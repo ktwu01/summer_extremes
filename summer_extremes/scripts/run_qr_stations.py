@@ -11,21 +11,25 @@ import argparse
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('this_month', type=int, help='Month to run')
+    parser.add_argument('procdir', type=str, default='/home/data/projects/summer_extremes/proc',
+                        help='Directory to save output')
+    parser.add_argument('ghcnd_dir', type=str, default='/home/data/GHCND',
+                        help='Directory containing GHCND files that span relevant period')
+    parser.add_argument('start_year', type=int, default=1959, help='First year of GHCND files')
+    parser.add_argument('end_year', type=int, default=2022, help='Last year of GHCND files')
+    parser.add_argument('nboot', type=int, default=100, help='Number of bootstrap samples')
     args = parser.parse_args()
     this_month = args.this_month
-
-    procdir = '/home/data/projects/summer_extremes/proc'
+    procdir = args.procdir
+    ghcnd_dir = args.ghcnd_dir
+    start_year = args.start_year
+    end_year = args.end_year
+    nboot = args.nboot
 
     lat_range = -90, 90
     lon_range = -180, 180
-    start_year = 1959
-    end_year = 2022
     GHCND_var_names = (['TMAX', 'TMIN'])
     missing_data_cutoff = 0.2  # max fraction of missing data during period
-
-    ghcnd_dir = '/home/data/GHCND'
-    ERA5_dir = '/home/data/ERA5'
-    ERA5_var_names = (['t2m', 't2m_x', 't2m_x'])
 
     nseasonal = 5  # number of seasonal harmonics
     ninteract = 1  # number of seasonal/trend interaction terms
@@ -35,7 +39,6 @@ if __name__ == '__main__':
     labelsize = 12
     fontsize = 14
 
-    nboot = 100  # number of times to bootstrap to get uncertainty estimates in trends
     # Control for FDR
     alpha_fdr = 0.1
 
