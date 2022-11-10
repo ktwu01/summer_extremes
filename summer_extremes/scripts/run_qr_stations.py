@@ -18,6 +18,8 @@ if __name__ == '__main__':
     parser.add_argument('start_year', type=int, default=1959, help='First year of GHCND files')
     parser.add_argument('end_year', type=int, default=2022, help='Last year of GHCND files')
     parser.add_argument('nboot', type=int, default=100, help='Number of bootstrap samples')
+    parser.add_argument('varname', type=str, help='GHCND variable name')
+
     args = parser.parse_args()
     this_month = args.this_month
     procdir = args.procdir
@@ -25,12 +27,12 @@ if __name__ == '__main__':
     start_year = args.start_year
     end_year = args.end_year
     nboot = args.nboot
+    variable_to_use = args.varname
 
     lat_range = -90, 90
     lon_range = -180, 180
-    GHCND_var_names = (['TMAX', 'TMIN'])
     missing_data_cutoff = 0.2  # max fraction of missing data during period
-
+    GHCND_var_names = ['TMAX', 'TMIN']
     nseasonal = 5  # number of seasonal harmonics
     ninteract = 1  # number of seasonal/trend interaction terms
 
@@ -118,21 +120,19 @@ if __name__ == '__main__':
     # Perform for each month separately
     t = pd.date_range(start='1950/01/01', periods=365, freq='D')
 
-    for variable_to_use in GHCND_var_names:
+    qr_savename = '%s/qr_station_data_%s_month_%02i_boot_%04i.nc' % (procdir, variable_to_use,
+                                                                     this_month, nboot)
+    if os.path.isfile(qr_savename):
+        ds_QR = xr.open_dataset(qr_savename)
+    else:
+        doys = t[t.month == this_month].dayofyear
+        # Fit QR trends for each month of data
+        ds_QR = heat_utils.fit_qr_trend(ds_ghcnd_seasonal_anoms['%s_residual' % variable_to_use],
+                                        doys[0],
+                                        doys[-1],
+                                        qs_to_fit,
+                                        nboot,
+                                        lastyear=2021,
+                                        gmt_fname='/glade/work/mckinnon/BEST/Land_and_Ocean_complete.txt')
 
-        qr_savename = '%s/qr_station_data_%s_month_%02i_boot_%04i.nc' % (procdir, variable_to_use,
-                                                                         this_month, nboot)
-        if os.path.isfile(qr_savename):
-            ds_QR = xr.open_dataset(qr_savename)
-        else:
-            doys = t[t.month == this_month].dayofyear
-
-            # Fit QR trends for each month of data
-            ds_QR = heat_utils.fit_qr_trend(ds_ghcnd_seasonal_anoms['%s_residual' % variable_to_use],
-                                            doys[0],
-                                            doys[-1],
-                                            qs_to_fit,
-                                            nboot,
-                                            lastyear=2021)
-
-            ds_QR.to_netcdf(qr_savename)
+        ds_QR.to_netcdf(qr_savename)
