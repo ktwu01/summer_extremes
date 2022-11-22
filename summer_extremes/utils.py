@@ -203,11 +203,11 @@ def process_ghcnd(yr_start, yr_end, ghcnd_dir='/home/data/GHCND', var_names=['TM
                 this_da.to_netcdf(savename)
 
 
-def fit_seasonal_cycle(da, varname, nseasonal, return_beta=False):
+def fit_seasonal_cycle(da_fit, varname, nseasonal, return_beta=False):
     """
     Parameters
     ----------
-    da : xr.DataArray
+    da_fit : xr.DataArray
         Data to fit
     varname : str
         Name of variable being fit
@@ -220,17 +220,13 @@ def fit_seasonal_cycle(da, varname, nseasonal, return_beta=False):
     ds_fitted : xr.Dataset
         Dataset containing original data, fitted data, and residual
     """
-
     # number of predictors
     npred = 1 + 2*nseasonal  # seasonal harmonics + intercept
-    nt = len(da.time)
-
-    # fit on this data only
-    da_fit = da.copy()
+    nt = len(da_fit.time)
 
     # create design matrix
     # seasonal harmonics
-    doy = da['time.dayofyear']
+    doy = da_fit['time.dayofyear']
     omega = 1/365.25
 
     X = np.empty((npred, nt))
@@ -241,11 +237,11 @@ def fit_seasonal_cycle(da, varname, nseasonal, return_beta=False):
 
     X_mat = np.matrix(X).T
 
-    if 'station' in da.coords:  # station data, will have missing values, so need to loop through
+    if 'station' in da_fit.coords:  # station data, will have missing values, so need to loop through
         ds_fitted = []
         ds_residual = []
 
-        for this_station in da.station:
+        for this_station in da_fit.station:
             this_X = X_mat.copy()
             this_y = da_fit.sel({'station': this_station}).values.copy()
             has_data = ~np.isnan(this_y)
@@ -263,9 +259,9 @@ def fit_seasonal_cycle(da, varname, nseasonal, return_beta=False):
             # predict
             yhat = np.dot(X_mat, beta)
             yhat = np.array(yhat).flatten()
-            residual = da.sel({'station': this_station}).copy() - yhat
+            residual = da_fit.sel({'station': this_station}).copy() - yhat
 
-            ds_fitted.append(da.sel({'station': this_station}).copy(data=yhat))
+            ds_fitted.append(da_fit.sel({'station': this_station}).copy(data=yhat))
             ds_residual.append(residual)
 
         ds_fitted = xr.concat(ds_fitted, dim='station')
@@ -275,20 +271,23 @@ def fit_seasonal_cycle(da, varname, nseasonal, return_beta=False):
     else:  # reanalysis
         nt_fit, nlat, nlon = da_fit.shape
         vals = da_fit.values.reshape((nt_fit, nlat*nlon))
-        y_mat = np.matrix(vals)
+        has_data = ~np.isnan(vals[0, :])  # in case of masking
+        y_mat = np.matrix(vals[:, has_data])
+        del vals
 
         # fit
         beta = np.linalg.multi_dot(((np.dot(X_mat.T, X_mat)).I, X_mat.T, y_mat))
+        del y_mat
 
         # predict
-        yhat = np.dot(X_mat, beta)
-        ds_fitted = da.copy(data=np.array(yhat).reshape((nt, nlat, nlon))).to_dataset(name='%s_fit' % varname)
-
-        residual = da - ds_fitted['%s_fit' % varname]
+        yhat_data = np.dot(X_mat, beta)
+        yhat = np.nan*np.ones((nt_fit, nlat*nlon))
+        yhat[:, has_data] = yhat_data
+        del yhat_data
+        ds_fitted = da_fit.copy(data=np.array(yhat).reshape((nt, nlat, nlon))).to_dataset(name='%s_fit' % varname)
+        del yhat
+        residual = da_fit - ds_fitted['%s_fit' % varname]
         ds_fitted['%s_residual' % varname] = residual
-
-    # Repetitive but helpful
-    ds_fitted['%s_full' % varname] = ds_fitted['%s_residual' % varname] + ds_fitted['%s_fit' % varname]
 
     if return_beta:
         return ds_fitted, beta
