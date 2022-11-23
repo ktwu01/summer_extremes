@@ -8,6 +8,10 @@ import xarray as xr
 def t2m_avg_max_min(year, era5_daily_dir='/home/data/ERA5/day'):
     da = xr.open_dataarray('%s/t2m_hourly_%04i.nc' % (era5_daily_dir, year))
 
+    # only keep ERA5 (not ERA5T)
+    if 'expver' in da.dims:
+        da = da.sel(expver=1)
+
     # calculate daily average
     da_daily_average = da.resample(time='D').mean()
     savedir = '%s/t2m' % era5_daily_dir
