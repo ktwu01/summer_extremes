@@ -3,6 +3,8 @@ import pandas as pd
 import xarray as xr
 import os
 from subprocess import check_call
+from record_breaking_heat import utils as heat_utils
+from statsmodels.regression.quantile_regression import QuantReg
 
 
 def hello_world(x1, x2):
@@ -293,3 +295,139 @@ def fit_seasonal_cycle(da_fit, varname, nseasonal, return_beta=False):
         return ds_fitted, beta
     else:
         return ds_fitted
+
+
+def fit_qr_residual_boot(da, doy_start, doy_end, qs_to_fit, nboot, max_iter=10000, lastyear=2020,
+                         gmt_fname='/home/data/BEST/Land_and_Ocean_complete.txt', lowpass_freq=1/10, butter_order=3):
+    """Fit a quantile regression model with GMT as covariate. Use the residual bootstrap.
+
+    Parameters
+    ----------
+    da : xr.DataArray
+        Contains desired variable as a function of station and time
+    doy_start : int
+        Day of year of beginning of season being fit
+    doy_end : int
+        Day of year of end of the season being fit
+    qs_to_fit : np.array
+        Array of quantiles to fit (independently - noncrossing is not enforced)
+    nboot : int
+        Number of times to bootstrap data (block size of one year) and refit QR model
+    max_iter : int
+        Maximum number of iterations for QuantReg model
+    lastyear : int
+        Last year to calculate trend with
+    gmt_fname : str
+        Local location of GMT time series from BEST
+    lowpass_freq : float
+        Desired cutoff frequency for Butterworth filter (in 1/yr)
+    butter_order : int
+        Desired order for Butterworth filter
+
+    Returns
+    -------
+    ds_QR : xr.Dataset
+        Contains all quantile regression trends and pvals, as well as bootstrapped trends
+
+    """
+
+    # fit on this data only
+    time_idx = (da.time.dt.dayofyear >= doy_start) & (da.time.dt.dayofyear <= doy_end)
+    this_da = da.sel(time=time_idx).sel(time=slice('%04i' % lastyear)).copy()
+
+    # global mean temperature time series as a stand-in for climate change in the regression model
+    da_gmt = heat_utils.get_GMT(lowpass_freq=lowpass_freq, gmt_fname=gmt_fname, butter_order=butter_order)
+    # resample GMT to daily, and match data time stamps
+    da_gmt = da_gmt.resample(time='1D').interpolate('linear')
+    cc = da_gmt.sel(time=this_da['time'])
+    cc -= np.mean(cc)
+
+    beta_qr = np.nan*np.ones((len(this_da.station), len(qs_to_fit), 2))
+    pval_qr = np.nan*np.ones((len(this_da.station), len(qs_to_fit)))
+    beta_qr_boot = np.nan*np.ones((len(this_da.station), len(qs_to_fit), nboot))
+
+    np.random.seed(123)
+    for station_count, this_station in enumerate(this_da.station):
+        if station_count % 100 == 0:
+            print('%i/%i' % (station_count, len(this_da.station)))
+
+        this_x = cc
+        this_y = this_da.sel(station=this_station)
+
+        pl = ~np.isnan(this_y)
+        if np.sum(pl) == 0:  # case of no data
+            continue
+
+        this_x_vec = this_x[pl].values
+        this_y_vec = this_y[pl].values
+
+        # Add jitter since data is rounded to 0.1
+        half_width = 0.05
+        jitter = 2*half_width*np.random.rand(len(this_y_vec)) - half_width
+        this_y_vec += jitter
+
+        this_x_vec = np.vstack((np.ones(len(this_x_vec)), this_x_vec)).T
+
+        model = QuantReg(this_y_vec, this_x_vec)
+
+        for ct_q, q in enumerate(qs_to_fit):
+            mfit = model.fit(q=q, max_iter=max_iter)
+            beta_qr[station_count, ct_q, :] = mfit.params
+            pval_qr[station_count, ct_q] = mfit.pvalues[-1]
+
+        # Bootstrap with block size of one year to assess significance of differences
+        yrs = np.unique(this_y['time.year'])
+
+        for kk in range(nboot):
+            # use the same years for each percentile in each bootstrap sample
+            new_yrs = np.random.choice(yrs, size=len(yrs))
+            # and therefore the same x values
+            x_boot = []
+            for yy in new_yrs:
+                x_boot.append(this_x.sel(time=slice('%04i' % yy, '%04i' % yy)))
+
+            x_boot = xr.concat(x_boot, dim='time')
+
+            for ct_q, q in enumerate(qs_to_fit):
+                # trend estimated using original dataset
+                signal = beta_qr[station_count, ct_q, 0] + beta_qr[station_count, ct_q, 1]*this_x
+                # residual from that trend
+                residual = this_y - signal
+
+                # signal given the bootstrapped sample of x's
+                boot_signal = beta_qr[station_count, ct_q, 0] + beta_qr[station_count, ct_q, 1]*x_boot
+
+                # resample the residuals, then add back to boot_signal
+                residual_boot = []
+                for yy in new_yrs:
+                    residual_boot.append(residual.sel(time=slice('%04i' % yy, '%04i' % yy)))
+                residual_boot = xr.concat(residual_boot, dim='time')
+                y_boot = boot_signal + residual_boot
+
+                pl = ~np.isnan(y_boot)
+                if np.sum(pl) == 0:  # case of no data
+                    continue
+                this_x_vec = x_boot[pl].values
+                this_y_vec = y_boot[pl].values
+
+                # Add jitter since data is rounded to 0.1
+                jitter = 2*half_width*np.random.rand(len(this_y_vec)) - half_width
+                this_y_vec += jitter
+
+                this_x_mat = np.vstack((np.ones(len(this_x_vec)), this_x_vec)).T
+                model = QuantReg(this_y_vec, this_x_mat)
+
+                mfit = model.fit(q=q, max_iter=max_iter)
+                beta_qr_boot[station_count, ct_q, kk] = mfit.params[-1]
+
+    ds_QR = xr.Dataset(data_vars={'beta_QR': (('station', 'qs', 'order'), beta_qr),
+                                  'pval_QR': (('station', 'qs'), pval_qr),
+                                  'beta_QR_boot': (('station', 'qs', 'sample'), beta_qr_boot)},
+                       coords={'station': da.station,
+                               'qs': qs_to_fit,
+                               'sample': np.arange(nboot),
+                               'lat': da.lat,
+                               'lon': da.lon,
+                               'order': np.arange(2)})
+
+    return ds_QR

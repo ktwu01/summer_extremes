@@ -1,16 +1,27 @@
 from subprocess import check_call
 import click
 import xarray as xr
+from glob import glob
 
 
 @click.command()
 @click.option('--year', help='Year of data to process', type=click.INT)
 def t2m_avg_max_min(year, era5_daily_dir='/home/data/ERA5/day'):
-    da = xr.open_dataarray('%s/t2m_hourly_%04i.nc' % (era5_daily_dir, year))
 
-    # only keep ERA5 (not ERA5T)
-    if 'expver' in da.dims:
-        da = da.sel(expver=1)
+    files = sorted(glob('%s/t2m_hourly_%04i.nc' % (era5_daily_dir, year)))
+    if len(files) > 1:  # case of the last year, when the last month is in a different file
+        da = []
+        for f in files:
+            this_da = xr.open_dataarray(f)
+            # only keep ERA5 (not ERA5T)
+            if 'expver' in this_da.dims:
+                this_da = this_da.sel(expver=1)
+            da.append(this_da)
+        da = xr.concat(da, dim='time')
+    else:
+        da = xr.open_dataarray(files[0])
+        if 'expver' in da.dims:
+            da = da.sel(expver=1)
 
     # calculate daily average
     da_daily_average = da.resample(time='D').mean()

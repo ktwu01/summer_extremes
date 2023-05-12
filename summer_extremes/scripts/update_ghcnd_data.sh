@@ -26,7 +26,7 @@ fi
 
 if $make_ncs
 then
-    python -c'from summer_extremes import utils; utils.process_ghcnd(1959, 2022)'
+    python -c'from summer_extremes import utils; utils.process_ghcnd(1959, 2023)'
 else
     echo "Not making netcdf files"
 fi

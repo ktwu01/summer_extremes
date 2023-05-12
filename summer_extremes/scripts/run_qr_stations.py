@@ -10,7 +10,7 @@ import argparse
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('this_month', type=int, help='Month to run')
+    parser.add_argument('this_month', type=int, help='Month to run, or range of months (first, zero, last)')
     parser.add_argument('procdir', type=str, default='/home/data/projects/summer_extremes/proc',
                         help='Directory to save output')
     parser.add_argument('ghcnd_dir', type=str, default='/home/data/GHCND',
@@ -125,14 +125,24 @@ if __name__ == '__main__':
     if os.path.isfile(qr_savename):
         ds_QR = xr.open_dataset(qr_savename)
     else:
-        doys = t[t.month == this_month].dayofyear
+        if this_month > 12:
+            start_month = int(str(this_month).split('0')[0])
+            end_month = int(str(this_month).split('0')[-1])
+            doys_start = t[t.month == start_month].dayofyear
+            doys_end = t[t.month == end_month].dayofyear
+            doy_start = doys_start[0]
+            doy_end = doys_end[-1]
+        else:
+            doys = t[t.month == this_month].dayofyear
+            doy_start = doys[0]
+            doy_end = doys[-1]
         # Fit QR trends for each month of data
-        ds_QR = heat_utils.fit_qr_trend(ds_ghcnd_seasonal_anoms['%s_residual' % variable_to_use],
-                                        doys[0],
-                                        doys[-1],
-                                        qs_to_fit,
-                                        nboot,
-                                        lastyear=2021,
-                                        gmt_fname='/glade/work/mckinnon/BEST/Land_and_Ocean_complete.txt')
+        ds_QR = summer_utils.fit_qr_residual_boot(ds_ghcnd_seasonal_anoms['%s_residual' % variable_to_use],
+                                                  doy_start,
+                                                  doy_end,
+                                                  qs_to_fit,
+                                                  nboot,
+                                                  lastyear=2021,
+                                                  gmt_fname='/glade/work/mckinnon/BEST/Land_and_Ocean_complete.txt')
 
         ds_QR.to_netcdf(qr_savename)
