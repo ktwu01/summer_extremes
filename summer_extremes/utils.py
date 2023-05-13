@@ -297,18 +297,19 @@ def fit_seasonal_cycle(da_fit, varname, nseasonal, return_beta=False):
         return ds_fitted
 
 
-def fit_qr_residual_boot(da, doy_start, doy_end, qs_to_fit, nboot, max_iter=10000, lastyear=2020,
-                         gmt_fname='/home/data/BEST/Land_and_Ocean_complete.txt', lowpass_freq=1/10, butter_order=3):
+def fit_qr_residual_boot(ds, months, variables, qs_to_fit, nboot, max_iter=10000, lastyear=2021,
+                         gmt_fname='/home/data/BEST/Land_and_Ocean_complete.txt', lowpass_freq=1/10, butter_order=3,
+                         savedir=None):
     """Fit a quantile regression model with GMT as covariate. Use the residual bootstrap.
 
     Parameters
     ----------
-    da : xr.DataArray
-        Contains desired variable as a function of station and time
-    doy_start : int
-        Day of year of beginning of season being fit
-    doy_end : int
-        Day of year of end of the season being fit
+    ds : xr.Dataset
+        Contains data for a given station
+    months : np.array
+        Contains set of months to fit QR for
+    variables : list
+        Contains names of variables in dataset to fit QR on
     qs_to_fit : np.array
         Array of quantiles to fit (independently - noncrossing is not enforced)
     nboot : int
@@ -323,6 +324,8 @@ def fit_qr_residual_boot(da, doy_start, doy_end, qs_to_fit, nboot, max_iter=1000
         Desired cutoff frequency for Butterworth filter (in 1/yr)
     butter_order : int
         Desired order for Butterworth filter
+    savedir : None or str
+        If None, return output. If string, save in that directory
 
     Returns
     -------
@@ -331,103 +334,129 @@ def fit_qr_residual_boot(da, doy_start, doy_end, qs_to_fit, nboot, max_iter=1000
 
     """
 
-    # fit on this data only
-    time_idx = (da.time.dt.dayofyear >= doy_start) & (da.time.dt.dayofyear <= doy_end)
-    this_da = da.sel(time=time_idx).sel(time=slice('%04i' % lastyear)).copy()
+    print('%s' % ds.station.values)
+    all_QR = []
+    # Loop through variables and months, then merge and save
+    for this_month in months:
+        # Get days of year for correct month or month range
+        t = pd.date_range(start='1950/01/01', periods=365, freq='D')  # generic year of time
+        if this_month > 12:
+            start_month = int(str(this_month).split('0')[0])
+            end_month = int(str(this_month).split('0')[-1])
+            doys_start = t[t.month == start_month].dayofyear
+            doys_end = t[t.month == end_month].dayofyear
+            doy_start = doys_start[0]
+            doy_end = doys_end[-1]
+        else:
+            doys = t[t.month == this_month].dayofyear
+            doy_start = doys[0]
+            doy_end = doys[-1]
 
-    # global mean temperature time series as a stand-in for climate change in the regression model
-    da_gmt = heat_utils.get_GMT(lowpass_freq=lowpass_freq, gmt_fname=gmt_fname, butter_order=butter_order)
-    # resample GMT to daily, and match data time stamps
-    da_gmt = da_gmt.resample(time='1D').interpolate('linear')
-    cc = da_gmt.sel(time=this_da['time'])
-    cc -= np.mean(cc)
+        for var_ct, this_var in enumerate(variables):
+            # initialize arrays
+            beta_qr = np.nan*np.ones((len(qs_to_fit), 2))
+            pval_qr = np.nan*np.ones((len(qs_to_fit)))
+            beta_qr_boot = np.nan*np.ones((len(qs_to_fit), nboot))
 
-    beta_qr = np.nan*np.ones((len(this_da.station), len(qs_to_fit), 2))
-    pval_qr = np.nan*np.ones((len(this_da.station), len(qs_to_fit)))
-    beta_qr_boot = np.nan*np.ones((len(this_da.station), len(qs_to_fit), nboot))
+            # Keep the bootstrap seed the same across months, variables, and stations
+            np.random.seed(123)
 
-    np.random.seed(123)
-    for station_count, this_station in enumerate(this_da.station):
-        if station_count % 100 == 0:
-            print('%i/%i' % (station_count, len(this_da.station)))
+            # fit on this data only
+            time_idx = (ds.time.dt.dayofyear >= doy_start) & (ds.time.dt.dayofyear <= doy_end)
+            this_da = ds[this_var].sel(time=time_idx).sel(time=slice('%04i' % lastyear))
 
-        this_x = cc
-        this_y = this_da.sel(station=this_station)
+            # global mean temperature time series as a stand-in for climate change in the regression model
+            da_gmt = heat_utils.get_GMT(lowpass_freq=lowpass_freq, gmt_fname=gmt_fname, butter_order=butter_order)
+            # resample GMT to daily, and match data time stamps
+            da_gmt = da_gmt.resample(time='1D').interpolate('linear')
+            cc = da_gmt.sel(time=this_da['time'])
+            cc -= np.mean(cc)
 
-        pl = ~np.isnan(this_y)
-        if np.sum(pl) == 0:  # case of no data
-            continue
+            this_x = cc
+            this_y = this_da.copy()
+            pl = ~np.isnan(this_y)
+            if np.sum(pl) == 0:  # case of no data
+                continue
 
-        this_x_vec = this_x[pl].values
-        this_y_vec = this_y[pl].values
+            this_x_vec = this_x[pl].values
+            this_y_vec = this_y[pl].values
 
-        # Add jitter since data is rounded to 0.1
-        half_width = 0.05
-        jitter = 2*half_width*np.random.rand(len(this_y_vec)) - half_width
-        this_y_vec += jitter
+            # Add jitter since data is rounded to 0.1
+            half_width = 0.05
+            jitter = 2*half_width*np.random.rand(len(this_y_vec)) - half_width
+            this_y_vec += jitter
 
-        this_x_vec = np.vstack((np.ones(len(this_x_vec)), this_x_vec)).T
+            this_x_vec = np.vstack((np.ones(len(this_x_vec)), this_x_vec)).T
 
-        model = QuantReg(this_y_vec, this_x_vec)
-
-        for ct_q, q in enumerate(qs_to_fit):
-            mfit = model.fit(q=q, max_iter=max_iter)
-            beta_qr[station_count, ct_q, :] = mfit.params
-            pval_qr[station_count, ct_q] = mfit.pvalues[-1]
-
-        # Bootstrap with block size of one year to assess significance of differences
-        yrs = np.unique(this_y['time.year'])
-
-        for kk in range(nboot):
-            # use the same years for each percentile in each bootstrap sample
-            new_yrs = np.random.choice(yrs, size=len(yrs))
-            # and therefore the same x values
-            x_boot = []
-            for yy in new_yrs:
-                x_boot.append(this_x.sel(time=slice('%04i' % yy, '%04i' % yy)))
-
-            x_boot = xr.concat(x_boot, dim='time')
+            model = QuantReg(this_y_vec, this_x_vec)
 
             for ct_q, q in enumerate(qs_to_fit):
-                # trend estimated using original dataset
-                signal = beta_qr[station_count, ct_q, 0] + beta_qr[station_count, ct_q, 1]*this_x
-                # residual from that trend
-                residual = this_y - signal
-
-                # signal given the bootstrapped sample of x's
-                boot_signal = beta_qr[station_count, ct_q, 0] + beta_qr[station_count, ct_q, 1]*x_boot
-
-                # resample the residuals, then add back to boot_signal
-                residual_boot = []
-                for yy in new_yrs:
-                    residual_boot.append(residual.sel(time=slice('%04i' % yy, '%04i' % yy)))
-                residual_boot = xr.concat(residual_boot, dim='time')
-                y_boot = boot_signal + residual_boot
-
-                pl = ~np.isnan(y_boot)
-                if np.sum(pl) == 0:  # case of no data
-                    continue
-                this_x_vec = x_boot[pl].values
-                this_y_vec = y_boot[pl].values
-
-                # Add jitter since data is rounded to 0.1
-                jitter = 2*half_width*np.random.rand(len(this_y_vec)) - half_width
-                this_y_vec += jitter
-
-                this_x_mat = np.vstack((np.ones(len(this_x_vec)), this_x_vec)).T
-                model = QuantReg(this_y_vec, this_x_mat)
-
                 mfit = model.fit(q=q, max_iter=max_iter)
-                beta_qr_boot[station_count, ct_q, kk] = mfit.params[-1]
+                beta_qr[ct_q, :] = mfit.params
+                pval_qr[ct_q] = mfit.pvalues[-1]
 
-    ds_QR = xr.Dataset(data_vars={'beta_QR': (('station', 'qs', 'order'), beta_qr),
-                                  'pval_QR': (('station', 'qs'), pval_qr),
-                                  'beta_QR_boot': (('station', 'qs', 'sample'), beta_qr_boot)},
-                       coords={'station': da.station,
-                               'qs': qs_to_fit,
-                               'sample': np.arange(nboot),
-                               'lat': da.lat,
-                               'lon': da.lon,
-                               'order': np.arange(2)})
+            # Bootstrap with block size of one year to assess significance of differences
+            yrs = np.unique(this_y['time.year'])
 
-    return ds_QR
+            for kk in range(nboot):
+                # use the same years for each percentile in each bootstrap sample
+                new_yrs = np.random.choice(yrs, size=len(yrs))
+                # and therefore the same x values
+                x_boot = []
+                for yy in new_yrs:
+                    x_boot.append(this_x.sel(time=slice('%04i' % yy, '%04i' % yy)))
+
+                x_boot = xr.concat(x_boot, dim='time')
+
+                for ct_q, q in enumerate(qs_to_fit):
+                    # trend estimated using original dataset
+                    signal = beta_qr[ct_q, 0] + beta_qr[ct_q, 1]*this_x
+                    # residual from that trend
+                    residual = this_y - signal
+
+                    # signal given the bootstrapped sample of x's
+                    boot_signal = beta_qr[ct_q, 0] + beta_qr[ct_q, 1]*x_boot
+
+                    # resample the residuals, then add back to boot_signal
+                    residual_boot = []
+                    for yy in new_yrs:
+                        residual_boot.append(residual.sel(time=slice('%04i' % yy, '%04i' % yy)))
+                    residual_boot = xr.concat(residual_boot, dim='time')
+                    y_boot = boot_signal + residual_boot
+
+                    pl = ~np.isnan(y_boot)
+                    if np.sum(pl) == 0:  # case of no data
+                        continue
+                    this_x_vec = x_boot[pl].values
+                    this_y_vec = y_boot[pl].values
+
+                    # Add jitter since data is rounded to 0.1
+                    jitter = 2*half_width*np.random.rand(len(this_y_vec)) - half_width
+                    this_y_vec += jitter
+
+                    this_x_mat = np.vstack((np.ones(len(this_x_vec)), this_x_vec)).T
+                    model = QuantReg(this_y_vec, this_x_mat)
+
+                    mfit = model.fit(q=q, max_iter=max_iter)
+                    beta_qr_boot[ct_q, kk] = mfit.params[-1]
+            try:
+                ds_QR = xr.Dataset(data_vars={'beta_QR_%s' % this_var: (('qs', 'order'), beta_qr),
+                                              'pval_QR_%s' % this_var: (('qs'), pval_qr),
+                                              'beta_QR_boot_%s' % this_var: (('qs', 'sample'), beta_qr_boot)},
+                                   coords={'qs': qs_to_fit,
+                                           'sample': np.arange(nboot),
+                                           'order': np.arange(2)})
+            except UnboundLocalError:
+                ds_QR['beta_QR_%s' % this_var] = (('qs', 'order'), beta_qr)
+                ds_QR['pval_QR_%s' % this_var] = (('qs'), pval_qr)
+                ds_QR['beta_QR_boot_%s' % this_var] = (('qs', 'sample'), beta_qr_boot)
+
+        all_QR.append(ds_QR)
+
+    all_QR = xr.concat(all_QR, dim='month')
+    all_QR['month'] = months
+
+    if savedir is None:
+        return all_QR
+    else:
+        all_QR.to_netcdf('%s/%s_qr.nc' % (savedir, ds.station.values))
