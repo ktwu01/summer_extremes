@@ -338,6 +338,9 @@ def fit_qr_residual_boot(ds, months, variables, qs_to_fit, nboot, max_iter=10000
     all_QR = []
     # Loop through variables and months, then merge and save
     for this_month in months:
+        # initialize dataset for each month
+        ds_QR = xr.Dataset(coords={'qs': qs_to_fit, 'sample': np.arange(nboot), 'order': np.arange(2)})
+
         # Get days of year for correct month or month range
         t = pd.date_range(start='1950/01/01', periods=365, freq='D')  # generic year of time
         if this_month > 12:
@@ -376,6 +379,12 @@ def fit_qr_residual_boot(ds, months, variables, qs_to_fit, nboot, max_iter=10000
             this_y = this_da.copy()
             pl = ~np.isnan(this_y)
             if np.sum(pl) == 0:  # case of no data
+                print('no data')
+                print('%s, %i' % (this_var, this_month))
+                ds_QR['beta_QR_%s' % this_var] = (('qs', 'order'), beta_qr)
+                ds_QR['pval_QR_%s' % this_var] = (('qs'), pval_qr)
+                ds_QR['beta_QR_boot_%s' % this_var] = (('qs', 'sample'), beta_qr_boot)
+                all_QR.append(ds_QR.copy())
                 continue
 
             this_x_vec = this_x[pl].values
@@ -440,20 +449,11 @@ def fit_qr_residual_boot(ds, months, variables, qs_to_fit, nboot, max_iter=10000
                     mfit = model.fit(q=q, max_iter=max_iter)
                     beta_qr_boot[ct_q, kk] = mfit.params[-1]
             # within variable and month loop
-            # make dataset if it's not already there
-            if 'ds_QR' not in locals():
-                ds_QR = xr.Dataset(data_vars={'beta_QR_%s' % this_var: (('qs', 'order'), beta_qr),
-                                              'pval_QR_%s' % this_var: (('qs'), pval_qr),
-                                              'beta_QR_boot_%s' % this_var: (('qs', 'sample'), beta_qr_boot)},
-                                   coords={'qs': qs_to_fit,
-                                           'sample': np.arange(nboot),
-                                           'order': np.arange(2)})
-            else:
-                ds_QR['beta_QR_%s' % this_var] = (('qs', 'order'), beta_qr)
-                ds_QR['pval_QR_%s' % this_var] = (('qs'), pval_qr)
-                ds_QR['beta_QR_boot_%s' % this_var] = (('qs', 'sample'), beta_qr_boot)
+            ds_QR['beta_QR_%s' % this_var] = (('qs', 'order'), beta_qr)
+            ds_QR['pval_QR_%s' % this_var] = (('qs'), pval_qr)
+            ds_QR['beta_QR_boot_%s' % this_var] = (('qs', 'sample'), beta_qr_boot)
 
-        all_QR.append(ds_QR.copy())
+            all_QR.append(ds_QR.copy())
 
     all_QR = xr.concat(all_QR, dim='month')
     all_QR['month'] = months
