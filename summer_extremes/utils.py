@@ -297,7 +297,7 @@ def fit_seasonal_cycle(da_fit, varname, nseasonal, return_beta=False):
         return ds_fitted
 
 
-def fit_qr_residual_boot(ds, months, variables, qs_to_fit, nboot, max_iter=10000, lastyear=2021,
+def fit_qr_residual_boot(ds, months, variables, qs_to_fit, nboot, max_iter=1000, lastyear=2021,
                          gmt_fname='/home/data/BEST/Land_and_Ocean_complete.txt', lowpass_freq=1/10, butter_order=3,
                          savedir=None):
     """Fit a quantile regression model with GMT as covariate. Use the residual bootstrap.
@@ -333,7 +333,6 @@ def fit_qr_residual_boot(ds, months, variables, qs_to_fit, nboot, max_iter=10000
         Contains all quantile regression trends and pvals, as well as bootstrapped trends
 
     """
-
     print('%s' % ds.station.values)
     all_QR = []
     # Loop through variables and months, then merge and save
@@ -342,18 +341,12 @@ def fit_qr_residual_boot(ds, months, variables, qs_to_fit, nboot, max_iter=10000
         ds_QR = xr.Dataset(coords={'qs': qs_to_fit, 'sample': np.arange(nboot), 'order': np.arange(2)})
 
         # Get days of year for correct month or month range
-        t = pd.date_range(start='1950/01/01', periods=365, freq='D')  # generic year of time
         if this_month > 12:
             start_month = int(str(this_month).split('0')[0])
             end_month = int(str(this_month).split('0')[-1])
-            doys_start = t[t.month == start_month].dayofyear
-            doys_end = t[t.month == end_month].dayofyear
-            doy_start = doys_start[0]
-            doy_end = doys_end[-1]
         else:
-            doys = t[t.month == this_month].dayofyear
-            doy_start = doys[0]
-            doy_end = doys[-1]
+            start_month = this_month
+            end_month = this_month
 
         for var_ct, this_var in enumerate(variables):
             # initialize arrays
@@ -365,7 +358,7 @@ def fit_qr_residual_boot(ds, months, variables, qs_to_fit, nboot, max_iter=10000
             np.random.seed(123)
 
             # fit on this data only
-            time_idx = (ds.time.dt.dayofyear >= doy_start) & (ds.time.dt.dayofyear <= doy_end)
+            time_idx = (ds.time.month >= start_month) & (ds.time.month <= end_month)
             this_da = ds[this_var].sel(time=time_idx).sel(time=slice('%04i' % lastyear))
 
             # global mean temperature time series as a stand-in for climate change in the regression model
@@ -379,12 +372,9 @@ def fit_qr_residual_boot(ds, months, variables, qs_to_fit, nboot, max_iter=10000
             this_y = this_da.copy()
             pl = ~np.isnan(this_y)
             if np.sum(pl) == 0:  # case of no data
-                print('no data')
-                print('%s, %i' % (this_var, this_month))
                 ds_QR['beta_QR_%s' % this_var] = (('qs', 'order'), beta_qr)
                 ds_QR['pval_QR_%s' % this_var] = (('qs'), pval_qr)
                 ds_QR['beta_QR_boot_%s' % this_var] = (('qs', 'sample'), beta_qr_boot)
-                all_QR.append(ds_QR.copy())
                 continue
 
             this_x_vec = this_x[pl].values
@@ -401,8 +391,9 @@ def fit_qr_residual_boot(ds, months, variables, qs_to_fit, nboot, max_iter=10000
 
             for ct_q, q in enumerate(qs_to_fit):
                 mfit = model.fit(q=q, max_iter=max_iter)
-                beta_qr[ct_q, :] = mfit.params
-                pval_qr[ct_q] = mfit.pvalues[-1]
+                if mfit.iterations < max_iter:  # only save fit if it has converged
+                    beta_qr[ct_q, :] = mfit.params
+                    pval_qr[ct_q] = mfit.pvalues[-1]
 
             # Bootstrap with block size of one year to assess significance of differences
             yrs = np.unique(this_y['time.year'])
@@ -447,17 +438,17 @@ def fit_qr_residual_boot(ds, months, variables, qs_to_fit, nboot, max_iter=10000
                     model = QuantReg(this_y_vec, this_x_mat)
 
                     mfit = model.fit(q=q, max_iter=max_iter)
-                    beta_qr_boot[ct_q, kk] = mfit.params[-1]
+                    if mfit.iterations < max_iter:  # only save fit if it has converged
+                        beta_qr_boot[ct_q, kk] = mfit.params[-1]
             # within variable and month loop
             ds_QR['beta_QR_%s' % this_var] = (('qs', 'order'), beta_qr)
             ds_QR['pval_QR_%s' % this_var] = (('qs'), pval_qr)
             ds_QR['beta_QR_boot_%s' % this_var] = (('qs', 'sample'), beta_qr_boot)
 
-            all_QR.append(ds_QR.copy())
+        all_QR.append(ds_QR)
 
     all_QR = xr.concat(all_QR, dim='month')
     all_QR['month'] = months
-
     if savedir is None:
         return all_QR
     else:
