@@ -439,19 +439,21 @@ def fit_qr_residual_boot(ds, months, variables, qs_to_fit, nboot, max_iter=10000
 
                     mfit = model.fit(q=q, max_iter=max_iter)
                     beta_qr_boot[ct_q, kk] = mfit.params[-1]
-            try:
+            # within variable and month loop
+            # make dataset if it's not already there
+            if 'ds_QR' not in locals():
                 ds_QR = xr.Dataset(data_vars={'beta_QR_%s' % this_var: (('qs', 'order'), beta_qr),
                                               'pval_QR_%s' % this_var: (('qs'), pval_qr),
                                               'beta_QR_boot_%s' % this_var: (('qs', 'sample'), beta_qr_boot)},
                                    coords={'qs': qs_to_fit,
                                            'sample': np.arange(nboot),
                                            'order': np.arange(2)})
-            except UnboundLocalError:
+            else:
                 ds_QR['beta_QR_%s' % this_var] = (('qs', 'order'), beta_qr)
                 ds_QR['pval_QR_%s' % this_var] = (('qs'), pval_qr)
                 ds_QR['beta_QR_boot_%s' % this_var] = (('qs', 'sample'), beta_qr_boot)
 
-        all_QR.append(ds_QR)
+        all_QR.append(ds_QR.copy())
 
     all_QR = xr.concat(all_QR, dim='month')
     all_QR['month'] = months
