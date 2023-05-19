@@ -297,7 +297,7 @@ def fit_seasonal_cycle(da_fit, varname, nseasonal, return_beta=False):
         return ds_fitted
 
 
-def fit_qr_residual_boot(ds, months, variables, qs_to_fit, nboot, max_iter=1000, lastyear=2021,
+def fit_qr_residual_boot(ds, months, variables, qs_to_fit, nboot, max_iter=10000, lastyear=2021,
                          gmt_fname='/home/data/BEST/Land_and_Ocean_complete.txt', lowpass_freq=1/10, butter_order=3,
                          savedir=None):
     """Fit a quantile regression model with GMT as covariate. Use the residual bootstrap.
