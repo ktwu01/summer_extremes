@@ -333,7 +333,6 @@ def fit_qr_residual_boot(ds, months, variables, qs_to_fit, nboot, max_iter=10000
         Contains all quantile regression trends and pvals, as well as bootstrapped trends
 
     """
-    print('%s' % ds.station.values)
     all_QR = []
     # Loop through variables and months, then merge and save
     for this_month in months:
@@ -358,7 +357,7 @@ def fit_qr_residual_boot(ds, months, variables, qs_to_fit, nboot, max_iter=10000
             np.random.seed(123)
 
             # fit on this data only
-            time_idx = (ds.time.month >= start_month) & (ds.time.month <= end_month)
+            time_idx = (ds.time.dt.month >= start_month) & (ds.time.dt.month <= end_month)
             this_da = ds[this_var].sel(time=time_idx).sel(time=slice('%04i' % lastyear))
 
             # global mean temperature time series as a stand-in for climate change in the regression model
