@@ -452,3 +452,109 @@ def fit_qr_residual_boot(ds, months, variables, qs_to_fit, nboot, max_iter=10000
         return all_QR
     else:
         all_QR.to_netcdf('%s/%s_qr.nc' % (savedir, ds.station.values))
+
+
+def calc_heat_metrics(residual, names, hot_cutoff=95, cold_cutoff=5):
+
+    Thot = residual.quantile(hot_cutoff/100).data
+    Tcold = residual.quantile(cold_cutoff/100).data
+
+    ds_metrics = []
+    if 'seasonal_max' in names:
+        metric = residual.groupby('time.year').max().rename('seasonal_max')
+        ds_metrics.append(metric)
+    if 'seasonal_min' in names:
+        metric = residual.groupby('time.year').min().rename('seasonal_min')
+        ds_metrics.append(metric)
+
+    if 'cum_excess_hot' in names:
+        metric = (residual.where(residual > Thot)).groupby('time.year').sum().rename('cum_excess_hot')
+        ds_metrics.append(metric)
+    if 'avg_excess_hot' in names:
+        metric = (residual.where(residual > Thot)).groupby('time.year').mean().rename('avg_excess_hot')
+        metric = metric.fillna(0)
+        ds_metrics.append(metric)
+    if 'ndays_excess_hot' in names:
+        metric = (residual.where(residual > Thot) > Thot).groupby('time.year').sum().rename('ndays_excess_hot')
+        ds_metrics.append(metric)
+
+    if 'cum_excess_cold' in names:
+        metric = (residual.where(residual < Tcold)).groupby('time.year').sum().rename('cum_excess_cold')
+        ds_metrics.append(metric)
+    if 'avg_excess_cold' in names:
+        metric = (residual.where(residual < Tcold)).groupby('time.year').mean().rename('avg_excess_cold')
+        metric = metric.fillna(0)
+        ds_metrics.append(metric)
+    if 'ndays_excess_cold' in names:
+        metric = (residual.where(residual < Tcold) <
+                  Tcold).groupby('time.year').sum().rename('ndays_excess_cold')
+        ds_metrics.append(metric)
+
+    if 'AR1' in names:
+        da_rho = []
+        for yy in np.unique(residual['time.year']):
+            tmp = residual.sel(time=slice('%04i' % yy, '%04i' % yy))
+            tmp_lag1 = tmp.shift({'time': 1})
+            rho = xr.corr(tmp, tmp_lag1, dim='time')
+            da_rho.append(rho)
+        yrs = metric.year
+        metric = xr.concat(da_rho, dim='year').rename('AR1')
+        metric['year'] = yrs
+        ds_metrics.append(metric)
+
+    ds_metrics = xr.merge(ds_metrics)
+
+    # remask
+    tmp = residual.mean('time')
+    ds_metrics = ds_metrics.where(~np.isnan(tmp))
+
+    return ds_metrics
+
+
+def rank_and_sort_heat_metrics(ds_metrics):
+    """
+    Turn each metric time series into a time series of ranks.
+
+    For heat metrics: rank #1 is hottest year (after removing median)
+    For cold metrics: rank #1 is coldest year (after removing median)
+    For AR(1): rank #1 is highest autocorrelation (not affected by removing median)
+
+    Parameters
+    ----------
+    ds_metrics : xarray.Dataset
+        Contains time series (annual) of heat metrics across domain
+
+    Returns
+    -------
+    ranks_all : xarray.Dataset
+        Contains ranks associated with each heat metric
+
+    """
+    # for hot metrics, #1 = hottest / most days
+    ranks_hot = (-ds_metrics[['seasonal_max', 'cum_excess_hot',
+                              'avg_excess_hot', 'ndays_excess_hot',
+                              'ndays_excess_cold', 'AR1']]).rank('year')
+
+    # for cold ranks, #1 = coldest
+    ranks_cold = (ds_metrics[['seasonal_min', 'cum_excess_cold',
+                              'avg_excess_cold']]).rank('year')
+
+    ranks_cold['ndays_excess_cold'] = ranks_hot['ndays_excess_cold']
+    ranks_hot = ranks_hot.drop('ndays_excess_cold')
+
+    mean_hot = ranks_hot[['seasonal_max', 'cum_excess_hot',
+                          'avg_excess_hot', 'ndays_excess_hot']].to_array(dim='new').mean('new')
+    ranks_hot = ranks_hot.assign(avg_across_metrics_hot=mean_hot)
+
+    mean_cold = ranks_cold.to_array(dim='new').mean('new')
+    ranks_cold = ranks_cold.assign(avg_across_metrics_cold=mean_cold)
+
+    # merge again
+    ranks_all = xr.merge((ranks_hot, ranks_cold))
+
+    # reorder for plotting
+    ranks_all = ranks_all[['seasonal_max', 'cum_excess_hot', 'avg_excess_hot', 'ndays_excess_hot',
+                           'avg_across_metrics_hot', 'AR1', 'seasonal_min', 'cum_excess_cold',
+                           'avg_excess_cold', 'ndays_excess_cold', 'avg_across_metrics_cold']]
+
+    return ranks_all
