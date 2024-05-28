@@ -3,16 +3,11 @@ import pandas as pd
 import xarray as xr
 import os
 from subprocess import check_call
-from record_breaking_heat import utils as heat_utils
-from statsmodels.regression.quantile_regression import QuantReg
+from scipy import stats
+from helpful_utilities.general import lowpass_butter
 
 
-def hello_world(x1, x2):
-    print(x1)
-    print(x2)
-
-
-def process_ghcnd(yr_start, yr_end, ghcnd_dir='/home/data/GHCND', var_names=['TMIN', 'TMAX'], country_list=None):
+def process_ghcnd(yr_start, yr_end, ghcnd_dir='/home/data/GHCND', var_names=['TMAX'], country_list=None):
     """This function will subset GHNCD dly files to ones that have sufficient coverage and, if desired, are in a
     specific set of countries.
 
@@ -205,299 +200,136 @@ def process_ghcnd(yr_start, yr_end, ghcnd_dir='/home/data/GHCND', var_names=['TM
                 this_da.to_netcdf(savename)
 
 
-def fit_seasonal_cycle(da_fit, varname, nseasonal, return_beta=False):
+def get_pvalue(x, y):
     """
-    Parameters
-    ----------
-    da_fit : xr.DataArray
-        Data to fit
-    varname : str
-        Name of variable being fit
-    nseasonal : int
-        Number of seasonal harmonics to use
-    return_beta : bool
-        Whether to return the associated regression coefficients.
-    Returns
-    -------
-    ds_fitted : xr.Dataset
-        Dataset containing original data, fitted data, and residual
-    """
-    # number of predictors
-    npred = 1 + 2*nseasonal  # seasonal harmonics + intercept
-    nt = len(da_fit.time)
-
-    # create design matrix
-    # seasonal harmonics
-    doy = da_fit['time.dayofyear']
-    omega = 1/365.25
-
-    X = np.empty((npred, nt))
-    X[0, :] = np.ones((nt, ))
-    for i in range(nseasonal):
-        s = np.exp(2*(i + 1)*np.pi*1j*omega*doy)
-        X[(1 + 2*i):(1 + 2*(i+1)), :] = np.vstack((np.real(s), np.imag(s)))
-
-    X_mat = np.matrix(X).T
-
-    if 'station' in da_fit.coords:  # station data, will have missing values, so need to loop through
-        ds_fitted = []
-        ds_residual = []
-
-        for this_station in da_fit.station:
-            this_X = X_mat.copy()
-            this_y = da_fit.sel({'station': this_station}).values.copy()
-            has_data = ~np.isnan(this_y)
-
-            if np.isnan(this_y).all():
-                continue
-
-            this_y = this_y[has_data]
-            this_X = this_X[has_data, :]
-            this_y = np.matrix(this_y).T
-
-            # fit
-            beta = np.linalg.multi_dot(((np.dot(this_X.T, this_X)).I, this_X.T, this_y))
-
-            # predict
-            yhat = np.dot(X_mat, beta)
-            yhat = np.array(yhat).flatten()
-            residual = da_fit.sel({'station': this_station}).copy() - yhat
-
-            ds_fitted.append(da_fit.sel({'station': this_station}).copy(data=yhat))
-            ds_residual.append(residual)
-
-        ds_fitted = xr.concat(ds_fitted, dim='station')
-        ds_fitted = ds_fitted.to_dataset(name='%s_fit' % varname)
-        ds_fitted['%s_residual' % varname] = xr.concat(ds_residual, dim='station')
-
-    else:  # reanalysis
-        nt_fit, nlat, nlon = da_fit.shape
-        vals = da_fit.values.reshape((nt_fit, nlat*nlon))
-        has_data = ~np.isnan(vals[0, :])  # in case of masking
-        y_mat = np.matrix(vals[:, has_data])
-        del vals
-
-        # fit
-        beta = np.linalg.multi_dot(((np.dot(X_mat.T, X_mat)).I, X_mat.T, y_mat))
-        del y_mat
-
-        # predict
-        yhat_data = np.dot(X_mat, beta)
-        yhat = np.nan*np.ones((nt_fit, nlat*nlon))
-        yhat[:, has_data] = yhat_data
-        del yhat_data
-        ds_fitted = da_fit.copy(data=np.array(yhat).reshape((nt, nlat, nlon))).to_dataset(name='%s_fit' % varname)
-        del yhat
-        residual = da_fit - ds_fitted['%s_fit' % varname]
-        ds_fitted['%s_residual' % varname] = residual
-
-    if return_beta:
-        return ds_fitted, beta
-    else:
-        return ds_fitted
-
-
-def fit_qr_residual_boot(ds, months, variables, qs_to_fit, nboot, max_iter=10000, lastyear=2021,
-                         gmt_fname='/home/data/BEST/Land_and_Ocean_complete.txt', lowpass_freq=1/10, butter_order=3,
-                         savedir=None):
-    """Fit a quantile regression model with GMT as covariate. Use the residual bootstrap.
+    Calculate a p-value from OLS regression between x and y
 
     Parameters
     ----------
-    ds : xr.Dataset
-        Contains data for a given station
-    months : np.array
-        Contains set of months to fit QR for
-    variables : list
-        Contains names of variables in dataset to fit QR on
-    qs_to_fit : np.array
-        Array of quantiles to fit (independently - noncrossing is not enforced)
-    nboot : int
-        Number of times to bootstrap data (block size of one year) and refit QR model
-    max_iter : int
-        Maximum number of iterations for QuantReg model
-    lastyear : int
-        Last year to calculate trend with
-    gmt_fname : str
-        Local location of GMT time series from BEST
-    lowpass_freq : float
-        Desired cutoff frequency for Butterworth filter (in 1/yr)
-    butter_order : int
-        Desired order for Butterworth filter
-    savedir : None or str
-        If None, return output. If string, save in that directory
+    x : numpy.ndarray
+        A 1D array of the x values for the regression
+    y : numpy.ndarray
+        A 1D array of the y values for the regression
 
     Returns
     -------
-    ds_QR : xr.Dataset
-        Contains all quantile regression trends and pvals, as well as bootstrapped trends
-
+    pvalue : float
+        The p-value estimated for the regression using linregress in scipy
     """
-    all_QR = []
-    # Loop through variables and months, then merge and save
-    for this_month in months:
-        # initialize dataset for each month
-        ds_QR = xr.Dataset(coords={'qs': qs_to_fit, 'sample': np.arange(nboot), 'order': np.arange(2)})
 
-        # Get days of year for correct month or month range
-        if this_month > 12:
-            start_month = int(str(this_month).split('0')[0])
-            end_month = int(str(this_month).split('0')[-1])
-        else:
-            start_month = this_month
-            end_month = this_month
-
-        for var_ct, this_var in enumerate(variables):
-            # initialize arrays
-            beta_qr = np.nan*np.ones((len(qs_to_fit), 2))
-            pval_qr = np.nan*np.ones((len(qs_to_fit)))
-            beta_qr_boot = np.nan*np.ones((len(qs_to_fit), nboot))
-
-            # Keep the bootstrap seed the same across months, variables, and stations
-            np.random.seed(123)
-
-            # fit on this data only
-            time_idx = (ds.time.dt.month >= start_month) & (ds.time.dt.month <= end_month)
-            this_da = ds[this_var].sel(time=time_idx).sel(time=slice('%04i' % lastyear))
-
-            # global mean temperature time series as a stand-in for climate change in the regression model
-            da_gmt = heat_utils.get_GMT(lowpass_freq=lowpass_freq, gmt_fname=gmt_fname, butter_order=butter_order)
-            # resample GMT to daily, and match data time stamps
-            da_gmt = da_gmt.resample(time='1D').interpolate('linear')
-            cc = da_gmt.sel(time=this_da['time'])
-            cc -= np.mean(cc)
-
-            this_x = cc
-            this_y = this_da.copy()
-            pl = ~np.isnan(this_y)
-            if np.sum(pl) == 0:  # case of no data
-                ds_QR['beta_QR_%s' % this_var] = (('qs', 'order'), beta_qr)
-                ds_QR['pval_QR_%s' % this_var] = (('qs'), pval_qr)
-                ds_QR['beta_QR_boot_%s' % this_var] = (('qs', 'sample'), beta_qr_boot)
-                continue
-
-            this_x_vec = this_x[pl].values
-            this_y_vec = this_y[pl].values
-
-            # Add jitter since data is rounded to 0.1
-            half_width = 0.05
-            jitter = 2*half_width*np.random.rand(len(this_y_vec)) - half_width
-            this_y_vec += jitter
-
-            this_x_vec = np.vstack((np.ones(len(this_x_vec)), this_x_vec)).T
-
-            model = QuantReg(this_y_vec, this_x_vec)
-
-            for ct_q, q in enumerate(qs_to_fit):
-                mfit = model.fit(q=q, max_iter=max_iter)
-                if mfit.iterations < max_iter:  # only save fit if it has converged
-                    beta_qr[ct_q, :] = mfit.params
-                    pval_qr[ct_q] = mfit.pvalues[-1]
-
-            # Bootstrap with block size of one year to assess significance of differences
-            yrs = np.unique(this_y['time.year'])
-
-            for kk in range(nboot):
-                # use the same years for each percentile in each bootstrap sample
-                new_yrs = np.random.choice(yrs, size=len(yrs))
-                # and therefore the same x values
-                x_boot = []
-                for yy in new_yrs:
-                    x_boot.append(this_x.sel(time=slice('%04i' % yy, '%04i' % yy)))
-
-                x_boot = xr.concat(x_boot, dim='time')
-
-                for ct_q, q in enumerate(qs_to_fit):
-                    # trend estimated using original dataset
-                    signal = beta_qr[ct_q, 0] + beta_qr[ct_q, 1]*this_x
-                    # residual from that trend
-                    residual = this_y - signal
-
-                    # signal given the bootstrapped sample of x's
-                    boot_signal = beta_qr[ct_q, 0] + beta_qr[ct_q, 1]*x_boot
-
-                    # resample the residuals, then add back to boot_signal
-                    residual_boot = []
-                    for yy in new_yrs:
-                        residual_boot.append(residual.sel(time=slice('%04i' % yy, '%04i' % yy)))
-                    residual_boot = xr.concat(residual_boot, dim='time')
-                    y_boot = boot_signal + residual_boot
-
-                    pl = ~np.isnan(y_boot)
-                    if np.sum(pl) == 0:  # case of no data
-                        continue
-                    this_x_vec = x_boot[pl].values
-                    this_y_vec = y_boot[pl].values
-
-                    # Add jitter since data is rounded to 0.1
-                    jitter = 2*half_width*np.random.rand(len(this_y_vec)) - half_width
-                    this_y_vec += jitter
-
-                    this_x_mat = np.vstack((np.ones(len(this_x_vec)), this_x_vec)).T
-                    model = QuantReg(this_y_vec, this_x_mat)
-
-                    mfit = model.fit(q=q, max_iter=max_iter)
-                    if mfit.iterations < max_iter:  # only save fit if it has converged
-                        beta_qr_boot[ct_q, kk] = mfit.params[-1]
-            # within variable and month loop
-            ds_QR['beta_QR_%s' % this_var] = (('qs', 'order'), beta_qr)
-            ds_QR['pval_QR_%s' % this_var] = (('qs'), pval_qr)
-            ds_QR['beta_QR_boot_%s' % this_var] = (('qs', 'sample'), beta_qr_boot)
-
-        all_QR.append(ds_QR)
-
-    all_QR = xr.concat(all_QR, dim='month')
-    all_QR['month'] = months
-    if savedir is None:
-        return all_QR
+    if np.isnan(y).any():
+        return np.nan
     else:
-        all_QR.to_netcdf('%s/%s_qr.nc' % (savedir, ds.station.values))
+        out = stats.linregress(x, y)
+        return out.pvalue
+
+
+def get_FDR_cutoff(da_pval, alpha_fdr=0.1):
+    """
+    Calculate the pvalue for significance using a false discovery rate approach.
+
+    Parameters
+    ----------
+    da_pval : xarray.DataArray
+        Contains pvalues for a field (can included nan values)
+    alpha_fdr : float
+        The false discovery rate control
+
+    Returns
+    -------
+    cutoff_pval : float
+        The highest pvalue for significance
+    """
+
+    nx, ny = da_pval.shape
+    pval_vec = da_pval.data.flatten()
+    has_data = ~np.isnan(pval_vec)
+    pval_vec = pval_vec[has_data]
+
+    a = np.arange(len(pval_vec)) + 1
+    # find last index where the sorted p-values are equal to or below a line with slope alpha_fdr
+    cutoff_idx = np.where(np.sort(pval_vec) <= alpha_fdr*a/len(a))[0][-1]
+    cutoff_pval = np.sort(pval_vec)[cutoff_idx]
+
+    return cutoff_pval
 
 
 def calc_heat_metrics(residual, names, hot_cutoff=95, cold_cutoff=5):
+    """
+    Calculate various reasonable metrics of hot and cold extremes, after removing the median,
+    or some other estimate of the middle of the distribution
 
-    Thot = residual.quantile(hot_cutoff/100).data
-    Tcold = residual.quantile(cold_cutoff/100).data
+    Parameters
+    ----------
+    residual : xarray.DataArray
+        Temperature deviations from the median
+    names : list
+        List of names of extreme metrics to calculate
+    hot_cutoff : int or float
+        The percentile cutoff for the defintion of a hot day in cum_excess_hot, avg_excess_hot, and
+        ndays_excess_hot
+    cold_cutoff : int or float
+        The percentile cutoff for the defintion of a cold day in cum_excess_cold, avg_excess_cold, and
+        ndays_excess_cold
+
+    Returns
+    -------
+    ds_metrics : xarray.Dataset
+        Contains time series (annual) of heat metrics across domain
+
+    """
+
+    Thot = residual.quantile(hot_cutoff/100, dim='time').drop('quantile')
+    Tcold = residual.quantile(cold_cutoff/100, dim='time').drop('quantile')
 
     ds_metrics = []
+    # Maximum value for the year
     if 'seasonal_max' in names:
         metric = residual.groupby('time.year').max().rename('seasonal_max')
         ds_metrics.append(metric)
+    # Minimum value for the year
     if 'seasonal_min' in names:
         metric = residual.groupby('time.year').min().rename('seasonal_min')
         ds_metrics.append(metric)
 
+    # Sum of temperature across days that exceed the local hot cutoff (e.g. 95th percentile)
     if 'cum_excess_hot' in names:
         metric = (residual.where(residual > Thot)).groupby('time.year').sum().rename('cum_excess_hot')
         ds_metrics.append(metric)
+    # Average temperature on days that exceed the local hot cutoff (e.g. 95th percentile)
     if 'avg_excess_hot' in names:
         metric = (residual.where(residual > Thot)).groupby('time.year').mean().rename('avg_excess_hot')
         metric = metric.fillna(0)
         ds_metrics.append(metric)
+    # Number of days that exceed the local hot cutoff (e.g. 95th percentile)
     if 'ndays_excess_hot' in names:
         metric = (residual.where(residual > Thot) > Thot).groupby('time.year').sum().rename('ndays_excess_hot')
         ds_metrics.append(metric)
 
+    #  Sum of degree-days below the cold cutoff
     if 'cum_excess_cold' in names:
         metric = (residual.where(residual < Tcold)).groupby('time.year').sum().rename('cum_excess_cold')
         ds_metrics.append(metric)
+    # Average number of degrees below the cold threshold
     if 'avg_excess_cold' in names:
         metric = (residual.where(residual < Tcold)).groupby('time.year').mean().rename('avg_excess_cold')
         metric = metric.fillna(0)
         ds_metrics.append(metric)
+    # Number of days below the cold threshold
     if 'ndays_excess_cold' in names:
         metric = (residual.where(residual < Tcold) <
                   Tcold).groupby('time.year').sum().rename('ndays_excess_cold')
         ds_metrics.append(metric)
 
+    # empirical lag-1 AR coefficient (within a season)
     if 'AR1' in names:
         da_rho = []
-        for yy in np.unique(residual['time.year']):
+        for yy in np.unique(residual['time.year']):  # loop through each year
             tmp = residual.sel(time=slice('%04i' % yy, '%04i' % yy))
             tmp_lag1 = tmp.shift({'time': 1})
             rho = xr.corr(tmp, tmp_lag1, dim='time')
             da_rho.append(rho)
-        yrs = metric.year
+        yrs = np.unique(residual['time.year'])
         metric = xr.concat(da_rho, dim='year').rename('AR1')
         metric['year'] = yrs
         ds_metrics.append(metric)
@@ -505,8 +337,9 @@ def calc_heat_metrics(residual, names, hot_cutoff=95, cold_cutoff=5):
     ds_metrics = xr.merge(ds_metrics)
 
     # remask
-    tmp = residual.mean('time')
-    ds_metrics = ds_metrics.where(~np.isnan(tmp))
+    # need to do mean because a single time step does not have all gridboxes (only warm season)
+    is_ocean = np.isnan(residual.mean('time'))
+    ds_metrics = ds_metrics.where(~is_ocean)
 
     return ds_metrics
 
@@ -530,22 +363,27 @@ def rank_and_sort_heat_metrics(ds_metrics):
         Contains ranks associated with each heat metric
 
     """
-    # for hot metrics, #1 = hottest / most days
+    # metrics for which the largest values are defined as #1
+    # all hot metrics, also number of cold days, and AR(1)
     ranks_hot = (-ds_metrics[['seasonal_max', 'cum_excess_hot',
                               'avg_excess_hot', 'ndays_excess_hot',
                               'ndays_excess_cold', 'AR1']]).rank('year')
 
-    # for cold ranks, #1 = coldest
+    # metrics for which the smallest values (generally negative) are defined as #1
+    # values based on minima of temperature
     ranks_cold = (ds_metrics[['seasonal_min', 'cum_excess_cold',
                               'avg_excess_cold']]).rank('year')
 
+    # move ndays_excess_cold into the cold list, and drop from hot
     ranks_cold['ndays_excess_cold'] = ranks_hot['ndays_excess_cold']
     ranks_hot = ranks_hot.drop('ndays_excess_cold')
 
+    # get average across hot day metrics (exclude AR(1))
     mean_hot = ranks_hot[['seasonal_max', 'cum_excess_hot',
                           'avg_excess_hot', 'ndays_excess_hot']].to_array(dim='new').mean('new')
     ranks_hot = ranks_hot.assign(avg_across_metrics_hot=mean_hot)
 
+    # get average across cold day metrics
     mean_cold = ranks_cold.to_array(dim='new').mean('new')
     ranks_cold = ranks_cold.assign(avg_across_metrics_cold=mean_cold)
 
@@ -558,3 +396,49 @@ def rank_and_sort_heat_metrics(ds_metrics):
                            'avg_excess_cold', 'ndays_excess_cold', 'avg_across_metrics_cold']]
 
     return ranks_all
+
+
+def get_slope(x, y):
+    """
+    Regress two data arrays against each other
+    """
+    pl = (~np.isnan(x)) & (~np.isnan(y))
+    if pl.any():
+        out = stats.linregress(x[pl], y[pl])
+        return out.slope
+    else:
+        return np.nan
+
+
+def get_residual(x, y):
+    """
+    Get the residual after regressing out x from y
+    """
+    pl = (~np.isnan(x)) & (~np.isnan(y))
+    if pl.any():
+        out = stats.linregress(x[pl], y[pl])
+        yhat = out.intercept + out.slope*x
+        residual = y - yhat
+        return residual
+    else:
+        return np.nan*np.ones((len(x), ))
+
+
+def get_smooth_clim(data):
+    """
+    Estimate a smoothed climatology using a lowpass Butterworth filter with a frequency of 1/30d
+
+    The data is mirrored on either side to address edge issues with the filter.
+    """
+    idx_data = ~np.isnan(data)
+    if idx_data.any():
+        vals = data[idx_data]
+        nt = len(vals)
+        tmp = np.hstack((vals[::-1], vals, vals[::-1]))
+        filtered = lowpass_butter(1, 1/30, 3, tmp)
+        smooth_data = data.copy()
+        smooth_data[idx_data] = filtered[nt:2*nt]
+
+        return smooth_data
+    else:
+        return data
