@@ -1,6 +1,5 @@
 import numpy as np
 import xarray as xr
-from helpful_utilities.general import lowpass_butter
 
 
 def calc_heat_metrics(residual, names, hot_cutoff=95, cold_cutoff=5):
@@ -145,23 +144,3 @@ def rank_and_sort_heat_metrics(ds_metrics):
                            'avg_excess_cold', 'ndays_excess_cold', 'avg_across_metrics_cold']]
 
     return ranks_all
-
-
-def get_smooth_clim(data):
-    """
-    Estimate a smoothed climatology using a lowpass Butterworth filter with a frequency of 1/30d
-
-    The data is mirrored on either side to address edge issues with the filter.
-    """
-    idx_data = ~np.isnan(data)
-    if idx_data.any():
-        vals = data[idx_data]
-        nt = len(vals)
-        tmp = np.hstack((vals[::-1], vals, vals[::-1]))
-        filtered = lowpass_butter(1, 1/30, 3, tmp)
-        smooth_data = data.copy()
-        smooth_data[idx_data] = filtered[nt:2*nt]
-
-        return smooth_data
-    else:
-        return data
