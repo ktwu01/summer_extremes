@@ -442,3 +442,27 @@ def get_smooth_clim(data):
         return smooth_data
     else:
         return data
+
+
+def calc_p_for_ds(ds, trend_dim='year'):
+    """
+    Calculate the p-value for a linear trend (in trend_dim) for a dataset or dataarray
+
+    Parameters
+    ----------
+    ds : xr.DataArray or xr.Dataset
+        Contains data for trend fitting. Should be trend_dim x lat x lon
+    trend_dim : str
+        Name of dimension trend is calculated over
+
+    Returns
+    -------
+    ds_pval : xr.DataArray or xr.Dataset
+        A lat x lon array containing p-values for the linear trend
+    """
+    ds_pval = xr.apply_ufunc(get_pvalue,
+                             ds[trend_dim],
+                             ds,
+                             input_core_dims=[[trend_dim], [trend_dim]],
+                             vectorize=True)
+    return ds_pval
