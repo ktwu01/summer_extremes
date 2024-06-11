@@ -849,3 +849,57 @@ def make_SEB_plots(SEB_rel_trends, precip_rel_trends, terms, figname, figdir):
             ax_map = add_text_regional_averages(to_plot, ax_map, regions)
 
     plt.savefig('%s/%s' % (figdir, figname), dpi=200, bbox_inches='tight')
+
+
+def compare_maps(SEB_rel_trends, precip_rel_trends):
+    """
+    Calculate the Spearman rank correlation coefficient between the various terms in the surface
+    energy balance equation.
+
+    Parameters
+    ----------
+    SEB_rel_trends : xr.Dataset
+        Contains the trends in each SEB term for hot, cold, and average days
+    precip_rel_trends : xr.Dataset
+        Contains the trends in precipitation for hot, cold, and average days
+
+    Returns
+    -------
+    Nothing, prints out correlations
+    """
+    from itertools import combinations
+
+    terms = 'T1', 'T2', 'sum', 'precip'
+    tails = 'hot', 'cold'
+
+    # Get unique pairs of terms
+    unique_pairs = list(combinations(terms, 2))
+    for tail in tails:
+        for pair in unique_pairs:
+
+            if '%s_%s' % (pair[0], tail) in list(SEB_rel_trends.data_vars):
+                map1 = (SEB_rel_trends['%s_%s' % (pair[0], tail)] -
+                        SEB_rel_trends['%s_avg' % pair[0]])
+            elif pair[0] == 'precip':
+                map1 = (precip_rel_trends['%s_%s' % (pair[0], tail)] -
+                        precip_rel_trends['%s_avg' % pair[0]])
+            elif pair[0] == 'sum':
+                map1 = ((SEB_rel_trends['T1_%s' % (tail)] + SEB_rel_trends['T2_%s' % (tail)]) -
+                        (SEB_rel_trends['T1_avg'] + SEB_rel_trends['T2_avg']))
+            else:
+                raise Exception('term not known')
+
+            if '%s_%s' % (pair[1], tail) in list(SEB_rel_trends.data_vars):
+                map2 = (SEB_rel_trends['%s_%s' % (pair[1], tail)] -
+                        SEB_rel_trends['%s_avg' % pair[1]])
+            elif pair[1] == 'precip':
+                map2 = (precip_rel_trends['%s_%s' % (pair[1], tail)] -
+                        precip_rel_trends['%s_avg' % pair[1]])
+            elif pair[1] == 'sum':
+                map2 = ((SEB_rel_trends['T1_%s' % (tail)] + SEB_rel_trends['T2_%s' % (tail)]) -
+                        (SEB_rel_trends['T1_avg'] + SEB_rel_trends['T2_avg']))
+            else:
+                raise Exception('term not known')
+
+            rho = xr.corr(map1, map2)
+            print('Correlation, %s tail, %s vs %s: %0.2f' % (tail, pair[0], pair[1], rho))
