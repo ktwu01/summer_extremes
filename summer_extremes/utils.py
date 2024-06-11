@@ -356,7 +356,7 @@ def make_rank_plots(ds_ranks1, rank1name, metrics_to_plot, long_names, figname, 
         fig = plt.figure(figsize=(20, 18))
         heights = [2, 0.2, 2, 0.2, 1, 0.2, 1, 0.2, 1, 0.2, 1]
 
-    widths = [8, 0.2, 2, 8, 0.2]
+    widths = [8, 0.2, 1, 8, 0.2]
 
     spec = fig.add_gridspec(ncols=len(widths), nrows=len(heights), width_ratios=widths, height_ratios=heights)
     spec.update(wspace=0.1, hspace=0.1)
@@ -446,6 +446,9 @@ def make_rank_plots(ds_ranks1, rank1name, metrics_to_plot, long_names, figname, 
                 domain_avg = calc_regional_averages(this_ds[metric], [region])
                 this_nyrs = len(domain_avg.year)
                 this_avg_rank = (this_nyrs + 1)/2
+                # Get variable for regression
+                X = (np.arange(this_nyrs)).astype(float)
+                X -= np.mean(X)
 
                 # Get info for null once, using the primary rank dataset (typically ERA5)
                 if d_ct == 0:
@@ -456,8 +459,6 @@ def make_rank_plots(ds_ranks1, rank1name, metrics_to_plot, long_names, figname, 
                     null_samples = create_null_samples(dof, this_nyrs, nsamples, null_name, procdir)
 
                     # Plot null range
-                    X = (np.arange(this_nyrs)).astype(float)
-                    X -= np.mean(X)
                     null_yhat = (null_samples.sel(degree=0).data[np.newaxis, :] +
                                  X[:, np.newaxis]*null_samples.sel(degree=1).data[np.newaxis, :])
                     ax.fill_between(domain_avg.year, np.percentile(null_yhat - this_avg_rank, 2.5, axis=1),
@@ -763,3 +764,88 @@ def combine_pr_datasets(pr_datasources, procdir, percentile_width, pr_start_year
     avg_pr_maps = xr.merge(avg_pr_maps)
 
     return avg_pr_maps
+
+
+def make_SEB_plots(SEB_rel_trends, precip_rel_trends, terms, figname, figdir):
+    """
+    Make plots of relative trends in SEB terms and precipitation.
+
+    Trends are the difference between those on hot/cold days and average days
+
+    Parameters
+    ----------
+    SEB_rel_trends : xr.Dataset
+        Dataset of trends in SEB terms conditional on temperature
+    precip_rel_trends : xr.Dataset
+        Dataset of trends in precipitation conditional on temperature
+    terms : list
+        List of terms to plot. Options: T1, T2, sum, precip
+    figname : str
+        Figure name for saving
+    figdir : str
+        Directory to save figure
+
+    Returns
+    -------
+    Nothing, figure is saved
+    """
+
+    term_opts = 'T1', 'T2', 'sum', 'precip'
+    idx_to_plot = np.isin(term_opts, terms)
+    longnames = np.array((r'$R^{\prime}(1-\overline{EF})$', r'$-EF^{\prime}\overline{R_n}$',
+                          'Forcing+EF', 'precipitation'))[idx_to_plot]
+    caption_names = np.array(('Forcing term', 'EF term', 'Forcing+EF', 'Precipitation'))[idx_to_plot]
+    tails = 'hot', 'cold'
+
+    fig = plt.figure(figsize=(20, 4*len(terms)))
+    widths = [8, 0.3, 2, 8, 0.3]
+    heights = 2*np.ones((len(terms),))
+    spec = fig.add_gridspec(ncols=len(widths), nrows=len(heights), width_ratios=widths, height_ratios=heights)
+
+    spec.update(wspace=0.1, hspace=0.1)
+
+    letter_ct = 0
+    for ct, term in enumerate(terms):
+        for ct2, tail in enumerate(tails):
+            if term == 'precip':
+                to_plot = (precip_rel_trends['precip_%s' % (tail)] -
+                           precip_rel_trends['precip_avg'])
+            elif term == 'sum':
+                to_plot = ((SEB_rel_trends['T1_%s' % tail] + SEB_rel_trends['T2_%s' % tail]) -
+                           (SEB_rel_trends['T1_avg'] + SEB_rel_trends['T2_avg']))
+            else:
+                to_plot = (SEB_rel_trends['%s_%s' % (term, tail)] -
+                           SEB_rel_trends['%s_avg' % (term)])
+
+            cmap = plt.cm.RdBu_r
+            bounds = np.arange(-16, 17, 4)
+            units = 'W/m$^{2}$'
+            if term == 'precip':
+                bounds = bounds/4
+                units = 'mm'
+                cmap = plt.cm.BrBG
+
+            cbar_label = 'Difference in %s\n trends (%s/%iy)' % (longnames[ct], units, trend_normalizer)
+
+            col_ct = 3*ct2
+
+            # Make map
+            ax_map = fig.add_subplot(spec[ct, col_ct], projection=plotcrs)
+            ax_map, pc = make_standard_map(to_plot, ax_map, cmap, bounds)
+
+            # Add colorbar
+            cax = fig.add_subplot(spec[ct, col_ct + 1])
+            cb = plt.colorbar(pc, cax=cax, orientation='vertical', extend='both')
+            cb.ax.tick_params(labelsize=labelsize)
+            cb.set_label(cbar_label, fontsize=fontsize)
+            ax_map.set_title('')
+            ax_map.text(0.01, 0.03, '(%s) %s,\n%s minus average' % (letters[letter_ct],
+                                                                    caption_names[ct], tail),
+                        transform=ax_map.transAxes, fontsize=12)
+
+            letter_ct += 1
+
+            # Get average values for each region to put on map
+            ax_map = add_text_regional_averages(to_plot, ax_map, regions)
+
+    plt.savefig('%s/%s' % (figdir, figname), dpi=200, bbox_inches='tight')
