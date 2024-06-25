@@ -5,11 +5,14 @@ from scipy import stats
 import matplotlib.pyplot as plt
 from helpful_utilities.data_proc import get_trend_array
 import helpful_utilities.stats as hu_stats
+from helpful_utilities.geom import get_regrid_country
 import string
 import cartopy.crs as ccrs
+from matplotlib import colors
 import cartopy.feature as cfeature
 from cartopy.mpl.gridliner import LONGITUDE_FORMATTER, LATITUDE_FORMATTER
 import matplotlib.ticker as mticker
+from glob import glob
 
 
 # For plots
@@ -33,6 +36,7 @@ ssp370_year2 = 2099
 lower_lat = -60
 upper_lat = 80
 tropics_bound = 10
+country_folder = '/home/data/geom/ne_110m_admin_0_countries/'
 
 
 def calc_heat_metrics(residual, names, hot_cutoff=95, cold_cutoff=5):
@@ -305,7 +309,7 @@ def create_null_samples(dof, ntime, nsamples, name, procdir):
 
 def make_rank_plots(ds_ranks1, rank1name, metrics_to_plot, long_names, figname, nsamples,
                     alpha_fdr, is_land, procdir, figdir,
-                    ds_ranks2=None, rank2name=None, make_map_rank2=False):
+                    ds_ranks2=None, rank2name=None, make_map_rank2=False, **kwargs):
     """
     Create trend maps and time series of average ranks.
 
@@ -368,14 +372,20 @@ def make_rank_plots(ds_ranks1, rank1name, metrics_to_plot, long_names, figname, 
     # Plotting parameters for time series
     markers = 's', 'o'
     linecolors = 'k', 'gray'
-    slope_colors = 'tab:purple', 'tab:blue'
-
-    # Initialize matrices to collect pvalues
-    pvals = []
+    if 'slope_colors' in kwargs:
+        slope_colors = kwargs['slope_colors']
+    else:
+        slope_colors = 'tab:purple', 'tab:blue'
+    if 'slope_ls' in kwargs:
+        slope_ls = kwargs['slope_ls']
+    else:
+        slope_ls = '-', '-'
 
     letter_ct = 0
     ds_ranks_all = [ds_ranks1, ds_ranks2]
+    # Initialize lists to collect pvalues and slopes
     pvals_ts = []  # time series p-values only assessed for first rank array
+    slope_ts = []  # value of slope for first rank array
 
     for ct, metric in enumerate(metrics_to_plot):
 
@@ -416,7 +426,11 @@ def make_rank_plots(ds_ranks1, rank1name, metrics_to_plot, long_names, figname, 
             ax_map, pc = make_standard_map(rank_trends, ax_map, cmap, bounds, is_sig)
 
             ax_map.set_title('')
-            ax_map.text(0.01, 0.05, '(%s)' % letters[letter_ct],
+            if 'label%i' % d_ct in kwargs:
+                label = kwargs['label%i' % d_ct]
+            else:
+                label = ''
+            ax_map.text(0.01, 0.05, '(%s) %s' % (letters[letter_ct], label),
                         transform=ax_map.transAxes, fontsize=fontsize)
 
             letter_ct += 1
@@ -476,12 +490,14 @@ def make_rank_plots(ds_ranks1, rank1name, metrics_to_plot, long_names, figname, 
                 linfit = stats.linregress(X, domain_avg)
                 this_yhat = linfit.intercept + linfit.slope*X
                 ax.plot(domain_avg.year, (this_yhat - this_avg_rank),
-                        color=slope_colors[d_ct], lw=3, zorder=zorder)
+                        color=slope_colors[d_ct], ls=slope_ls[d_ct], lw=3, zorder=zorder)
 
                 # Estimate two-sided p-value based on where the observed slope falls within the null slopes
                 if d_ct == 0:
                     this_pval = hu_stats.p_value_from_synthetic_null_data(linfit.slope, null_samples.sel(degree=1))
                     pvals_ts.append(this_pval)
+                    # Also save slope values
+                    slope_ts.append(linfit.slope)
 
                 # Save for correlation if two time series are plotted
                 ts_for_corr.append(domain_avg)
@@ -494,6 +510,9 @@ def make_rank_plots(ds_ranks1, rank1name, metrics_to_plot, long_names, figname, 
             else:
                 ax.set_title('%s (%s)' % (long_names[ct], region), fontsize=fontsize)
 
+            # Add legend
+            if (region == 'Global') & ('legend_labels' in kwargs):
+                ax.legend(kwargs['legend_labels'], ncol=4, loc='lower center')
             ax.tick_params(labelsize=labelsize)
             if region != 'SH':
                 ax.set_xticks([])
@@ -513,15 +532,17 @@ def make_rank_plots(ds_ranks1, rank1name, metrics_to_plot, long_names, figname, 
     counter = 0
     for ct, metric in enumerate(metrics_to_plot):
         for r_ct, region in enumerate(regions):
-            print('pval = %0.3f, sig = %s (%s %s)' % (pvals_ts[counter], is_sig_ts[counter].astype(bool),
-                                                      region, metric))
+            print('slope = %0.2f, pval = %0.3f, sig = %s (%s %s)' % (slope_ts[counter],
+                                                                     pvals_ts[counter],
+                                                                     is_sig_ts[counter].astype(bool),
+                                                                     region, metric))
             counter += 1
 
     # Save figure
     plt.savefig('%s/%s' % (figdir, figname), dpi=200, bbox_inches='tight')
 
 
-def make_standard_map(da, ax, cmap, bounds, is_sig=None):
+def make_standard_map(da, ax, cmap, bounds, is_sig=None, is_stations=False):
     """
     Plot the lat/lon dataframe on the axis ax
 
@@ -537,6 +558,8 @@ def make_standard_map(da, ax, cmap, bounds, is_sig=None):
         Colorbar intervals
     is_sig : None or xr.DataArray
         0/1 indicator of whether a gridbox is significant (= 1)
+    is_stations : bool
+        Indicator of whether point data are being plotted
 
     Returns
     -------
@@ -547,13 +570,22 @@ def make_standard_map(da, ax, cmap, bounds, is_sig=None):
 
     ax.fill_betweenx([-tropics_bound, tropics_bound], -180, 180, color='gray', alpha=0.5, transform=ccrs.PlateCarree())
 
-    pc = da.plot.pcolormesh(ax=ax,
-                            cmap=cmap,
-                            levels=bounds,
-                            transform=datacrs,
-                            zorder=1,
-                            add_colorbar=False,
-                            extend='both')
+    if is_stations:
+        norm = colors.BoundaryNorm(bounds, cmap.N)
+        pc = ax.scatter(da.lon, da.lat, c=da.data,
+                        transform=datacrs,
+                        s=6,
+                        zorder=4,
+                        cmap=cmap,
+                        norm=norm)
+    else:
+        pc = da.plot.pcolormesh(ax=ax,
+                                cmap=cmap,
+                                levels=bounds,
+                                transform=datacrs,
+                                zorder=1,
+                                add_colorbar=False,
+                                extend='both')
 
     if is_sig is not None:
         cs = is_sig.fillna(0).plot.contourf(ax=ax,
@@ -726,7 +758,7 @@ def get_mask_land_Greenland(land_cutoff=0.5, era5_ls_fname='/home/data/ERA5/fx/e
     return is_land
 
 
-def combine_pr_datasets(pr_datasources, procdir, percentile_width, pr_start_year):
+def combine_pr_datasets(pr_datasources, procdir, percentile_width, pr_start_year, tail_dict):
     """
     Average across precipitation datasets in terms of their trends on extreme vs avg days.
 
@@ -740,6 +772,8 @@ def combine_pr_datasets(pr_datasources, procdir, percentile_width, pr_start_year
         Size of percentile bins for hot, cold, avg
     pr_start_year : int
         Starting year for precipitation trends. Note that some datasets start later.
+    tail_dict : dictionary
+        Mapping from tail descriptor (e.g. hot) to percentile (e.g. 95)
 
     Returns
     -------
@@ -747,26 +781,26 @@ def combine_pr_datasets(pr_datasources, procdir, percentile_width, pr_start_year
         The average across datasets in terms of different trends in tails versus middle
     """
 
-    tails = 'hot', 'cold', 'avg'
+    tails = 'hot', 'cold', 'median'
     avg_pr_maps = []
     for ct2, tail in enumerate(tails):
         all_maps = []
         for ct, datasource in enumerate(pr_datasources):
             # Load relative precipitation trends
-            fname = '%s/%s_precip_relative_trends_p%02i_%04i-2023.nc' % (procdir, datasource,
-                                                                         percentile_width, pr_start_year)
+            fname = '%s/%s_precip_relative_stats_p%02i_%04i-2023.nc' % (procdir, datasource,
+                                                                        percentile_width, pr_start_year)
             ds_relative_trends = xr.open_dataset(fname)
-            to_save = ds_relative_trends['precip_%s' % (tail)]
+            to_save = ds_relative_trends['trend_p%02i' % (tail_dict[tail])]
             all_maps.append(to_save.rename('%s' % datasource))
         all_maps = xr.concat(all_maps, dim='datasource')
-        avg_map = (all_maps.mean('datasource')).rename('precip_%s' % tail)
+        avg_map = (all_maps.mean('datasource')).rename('trend_p%02i' % tail_dict[tail])
         avg_pr_maps.append(avg_map)
     avg_pr_maps = xr.merge(avg_pr_maps)
 
     return avg_pr_maps
 
 
-def make_SEB_plots(SEB_rel_trends, precip_rel_trends, terms, figname, figdir):
+def make_SEB_plots(SEB_rel_trends, precip_rel_trends, terms, tail_dict, figname, figdir):
     """
     Make plots of relative trends in SEB terms and precipitation.
 
@@ -779,7 +813,9 @@ def make_SEB_plots(SEB_rel_trends, precip_rel_trends, terms, figname, figdir):
     precip_rel_trends : xr.Dataset
         Dataset of trends in precipitation conditional on temperature
     terms : list
-        List of terms to plot. Options: T1, T2, sum, precip
+        List of terms to plot. Options: T1, T2, T1a, T1b, total, precip
+    tail_dict : dictionary
+        Mapping from hot/cold to percentiles
     figname : str
         Figure name for saving
     figdir : str
@@ -790,11 +826,13 @@ def make_SEB_plots(SEB_rel_trends, precip_rel_trends, terms, figname, figdir):
     Nothing, figure is saved
     """
 
-    term_opts = 'T1', 'T2', 'sum', 'precip'
-    idx_to_plot = np.isin(term_opts, terms)
+    term_opts = 'T1', 'T2', 'T1a', 'T1b', 'total', 'precip'
+    index_match = [term_opts.index(term) for term in terms]
     longnames = np.array((r'$R^{\prime}(1-\overline{EF})$', r'$-EF^{\prime}\overline{R_n}$',
-                          'Forcing+EF', 'precipitation'))[idx_to_plot]
-    caption_names = np.array(('Forcing term', 'EF term', 'Forcing+EF', 'Precipitation'))[idx_to_plot]
+                          r'$SW^{\prime}(1-\overline{EF})$', r'$-LW^{\prime}(1-\overline{EF})$',
+                          'Forcing+EF', 'precipitation'))[index_match]
+    caption_names = np.array(('Forcing term', 'EF term', 'SW term', 'LW term',
+                              'Forcing+EF', 'Precipitation'))[index_match]
     tails = 'hot', 'cold'
 
     fig = plt.figure(figsize=(20, 4*len(terms)))
@@ -808,21 +846,18 @@ def make_SEB_plots(SEB_rel_trends, precip_rel_trends, terms, figname, figdir):
     for ct, term in enumerate(terms):
         for ct2, tail in enumerate(tails):
             if term == 'precip':
-                to_plot = (precip_rel_trends['precip_%s' % (tail)] -
-                           precip_rel_trends['precip_avg'])
-            elif term == 'sum':
-                to_plot = ((SEB_rel_trends['T1_%s' % tail] + SEB_rel_trends['T2_%s' % tail]) -
-                           (SEB_rel_trends['T1_avg'] + SEB_rel_trends['T2_avg']))
+                to_plot = (precip_rel_trends['trend_p%02i' % (tail_dict[tail])] -
+                           precip_rel_trends['trend_p50'])
             else:
-                to_plot = (SEB_rel_trends['%s_%s' % (term, tail)] -
-                           SEB_rel_trends['%s_avg' % (term)])
+                to_plot = (SEB_rel_trends['%s_p%02i' % (term, tail_dict[tail])] -
+                           SEB_rel_trends['%s_p50' % (term)])
 
             cmap = plt.cm.RdBu_r
             bounds = np.arange(-16, 17, 4)
             units = 'W/m$^{2}$'
             if term == 'precip':
                 bounds = bounds/4
-                units = 'mm'
+                units = 'mm/day'
                 cmap = plt.cm.BrBG
 
             cbar_label = 'Difference in %s\n trends (%s/%iy)' % (longnames[ct], units, trend_normalizer)
@@ -839,8 +874,8 @@ def make_SEB_plots(SEB_rel_trends, precip_rel_trends, terms, figname, figdir):
             cb.ax.tick_params(labelsize=labelsize)
             cb.set_label(cbar_label, fontsize=fontsize)
             ax_map.set_title('')
-            ax_map.text(0.01, 0.03, '(%s) %s,\n%s minus average' % (letters[letter_ct],
-                                                                    caption_names[ct], tail),
+            ax_map.text(0.01, 0.03, '(%s) %s,\n%s minus median' % (letters[letter_ct],
+                                                                   caption_names[ct], tail),
                         transform=ax_map.transAxes, fontsize=12)
 
             letter_ct += 1
@@ -851,7 +886,7 @@ def make_SEB_plots(SEB_rel_trends, precip_rel_trends, terms, figname, figdir):
     plt.savefig('%s/%s' % (figdir, figname), dpi=200, bbox_inches='tight')
 
 
-def compare_maps(SEB_rel_trends, precip_rel_trends):
+def compare_maps(SEB_rel_trends, precip_rel_trends, terms, tail_dict):
     """
     Calculate the Spearman rank correlation coefficient between the various terms in the surface
     energy balance equation.
@@ -862,6 +897,10 @@ def compare_maps(SEB_rel_trends, precip_rel_trends):
         Contains the trends in each SEB term for hot, cold, and average days
     precip_rel_trends : xr.Dataset
         Contains the trends in precipitation for hot, cold, and average days
+    terms : list
+        List of terms to plot. Options: T1, T2, T1a, T1b, total, precip
+    tail_dict : dictionary
+        Mapping from hot/cold to percentiles
 
     Returns
     -------
@@ -869,37 +908,265 @@ def compare_maps(SEB_rel_trends, precip_rel_trends):
     """
     from itertools import combinations
 
-    terms = 'T1', 'T2', 'sum', 'precip'
     tails = 'hot', 'cold'
 
     # Get unique pairs of terms
     unique_pairs = list(combinations(terms, 2))
     for tail in tails:
+        tail_str = 'p%02i' % (tail_dict[tail])
         for pair in unique_pairs:
 
-            if '%s_%s' % (pair[0], tail) in list(SEB_rel_trends.data_vars):
-                map1 = (SEB_rel_trends['%s_%s' % (pair[0], tail)] -
-                        SEB_rel_trends['%s_avg' % pair[0]])
+            if '%s_%s' % (pair[0], tail_str) in list(SEB_rel_trends.data_vars):
+                map1 = (SEB_rel_trends['%s_%s' % (pair[0], tail_str)] -
+                        SEB_rel_trends['%s_p50' % pair[0]])
             elif pair[0] == 'precip':
-                map1 = (precip_rel_trends['%s_%s' % (pair[0], tail)] -
-                        precip_rel_trends['%s_avg' % pair[0]])
-            elif pair[0] == 'sum':
-                map1 = ((SEB_rel_trends['T1_%s' % (tail)] + SEB_rel_trends['T2_%s' % (tail)]) -
-                        (SEB_rel_trends['T1_avg'] + SEB_rel_trends['T2_avg']))
+                map1 = (precip_rel_trends['trend_%s' % (tail_str)] -
+                        precip_rel_trends['trend_p50'])
             else:
                 raise Exception('term not known')
 
-            if '%s_%s' % (pair[1], tail) in list(SEB_rel_trends.data_vars):
-                map2 = (SEB_rel_trends['%s_%s' % (pair[1], tail)] -
-                        SEB_rel_trends['%s_avg' % pair[1]])
+            if '%s_%s' % (pair[1], tail_str) in list(SEB_rel_trends.data_vars):
+                map2 = (SEB_rel_trends['%s_%s' % (pair[1], tail_str)] -
+                        SEB_rel_trends['%s_p50' % pair[1]])
             elif pair[1] == 'precip':
-                map2 = (precip_rel_trends['%s_%s' % (pair[1], tail)] -
-                        precip_rel_trends['%s_avg' % pair[1]])
-            elif pair[1] == 'sum':
-                map2 = ((SEB_rel_trends['T1_%s' % (tail)] + SEB_rel_trends['T2_%s' % (tail)]) -
-                        (SEB_rel_trends['T1_avg'] + SEB_rel_trends['T2_avg']))
+                map2 = (precip_rel_trends['trend_%s' % (tail_str)] -
+                        precip_rel_trends['trend_p50'])
             else:
                 raise Exception('term not known')
 
             rho = xr.corr(map1, map2)
             print('Correlation, %s tail, %s vs %s: %0.2f' % (tail, pair[0], pair[1], rho))
+
+
+def mask_start_end(da, start_year, end_year, end_SH_lat):
+    """
+    Mask to match other analysis:
+    - no NH data in start_year
+    - no SH data before halfway through the year (e.g. June)
+    - no SH data beyond halfway through the year (e.g. June) in end_year
+    """
+    nh_start_year = (da.lat > end_SH_lat) & (da['time.year'] == start_year)
+    sh_start_year = (da.lat < end_SH_lat) & (da['time.year'] == start_year) & (da['time.month'] <= 6)
+    sh_end_year = (da.lat < end_SH_lat) & (da['time.year'] == end_year) & (da['time.month'] >= 6)
+    keep_data = ~nh_start_year & ~sh_start_year & ~sh_end_year
+
+    return da.where(keep_data)
+
+
+def shift_replace_SH(da, end_SH_lat):
+    """
+    Move SH data forward by 1/2 year to align warm seasons in same calendar year
+    """
+
+    # find SH lats
+    idx_SH = da.lat <= end_SH_lat
+
+    # pull out SH data, and shift
+    da_SH = da.sel(lat=slice(end_SH_lat)).shift({'time': int(365/2)})
+
+    # replace SH data with shifted data
+    da[:, idx_SH, :] = da_SH
+
+    return da
+
+
+def get_cmip_mask(this_model, land_cutoff, cmip6_dir):
+    """
+    Get mask for land (excluding Greenland) for each CMIP model
+    """
+
+    mask_name = glob('%s/fx/sftlf_fx_%s*.nc' % (cmip6_dir, this_model))[0]
+    lsmask = xr.open_dataset(mask_name)['sftlf']
+    if lsmask.max() > 1:
+        lsmask /= 100
+
+    # round latitude for matching to data (issue in some models)
+    lsmask = lsmask.assign_coords(lat=np.round(lsmask.lat, 3), lon=np.round(lsmask.lon, 3))
+
+    # Get Greenland
+    da_greenland = get_regrid_country('Greenland', country_folder,
+                                      lsmask.lat, lsmask.lon, dilate=True)
+
+    # Remove ocean and Greenland
+    is_land = (lsmask > land_cutoff) & ~da_greenland
+
+    return is_land
+
+
+def get_cmip_tasmax_for_idx(this_model, this_variant, start_year, end_year,
+                            lower_lat, upper_lat, land_cutoff, procdir, cmip6_dir):
+    """
+    Collect CMIP6 temperature for calculation of hot, avg, cold days
+
+    Processing steps:
+    (1) mask to time range
+    (2) mask to land and Greenland
+    (3) mask to latitude range
+    (4) mask to warm season
+    (5) mask to same data availability as ERA5
+
+    Seasonal cycle is not removed because temperature percentiles are calculated as a function of doy.
+    """
+
+    hist_files = sorted(glob('%s/historical/day/tasmax/%s/%s/g*/*.nc' % (cmip6_dir, this_model, this_variant)))
+    ssp_files = sorted(glob('%s/ssp370/day/tasmax/%s/%s/g*/*.nc' % (cmip6_dir, this_model, this_variant)))
+
+    da = xr.open_mfdataset((hist_files + ssp_files)).convert_calendar('365_day')['tasmax']
+
+    # subset to correct years
+    da = da.sel(time=slice('%04i' % (start_year), '%04i' % (end_year)))
+    nlat = len(da.lat)
+    nlon = len(da.lon)
+
+    # Get land mask
+    is_land = get_cmip_mask(this_model, land_cutoff, cmip6_dir)
+
+    # round latitude for matching with landmask
+    da = da.assign_coords(lat=np.round(da.lat, 3), lon=np.round(da.lon, 3))
+
+    da = da.where(is_land)
+
+    # Make sure nothing has gone wrong with dimensions
+    assert len(da.lat) == nlat
+    assert len(da.lon) == nlon
+
+    # Subset to lat range
+    da = da.sel(lat=slice(lower_lat, upper_lat))
+
+    # Subset to warm season
+    warm_season_file = '%s/%s-%s_hottest_doys_%s_%04i-%04i.nc' % (procdir, this_model,
+                                                                  this_variant, 'tasmax',
+                                                                  start_year, end_year)
+
+    da_doy = xr.open_dataarray(warm_season_file)
+
+    assert len(da_doy.lat) == len(da.lat)
+    da = da.groupby('time.dayofyear').where(da_doy == 1).load()
+
+    # Mask out start/end to match other data analyses (same number of days at each location)
+    ndays_first_half = da_doy.sel(dayofyear=slice(0, 365/2)).sum('dayofyear')
+    end_SH_idx = np.where(ndays_first_half == 0)[0][-1]
+    end_SH_lat = da_doy.lat[end_SH_idx].data + 0.5
+    da = mask_start_end(da, start_year, end_year, end_SH_lat)
+
+    return da
+
+
+def calc_rel_precip_stats(da, idx_all, is_land, pr_name, percentile_width, percentile_base,
+                          slope_normalizer, start_year, end_year, procdir,
+                          return_stats=False, rain_cut=0.2):
+    """
+    Calculate precipitation stats (probability, average) and trends conditioning on different
+    types of days (e.g. hot, average, cold temperatures)
+
+    Parameters
+    ----------
+    da : xr.DataArray
+        Precipitation data
+    idx_all : xr.Dataset
+        Contains indicators of if days fall into certain percentile bins
+    is_land : xr.DataArray
+        Land mask
+    pr_name : str
+        Name of precipitation dataset for saving
+    percentile_width : int
+        The half-width of the percentile categories (0-100)
+    percentile_base : numpy.array
+        The middle percentiles to define the categories (0-100)
+    slope_normalizer : float
+        Mutliplier for the trend. Note that xarray time trends are in per nanosecond
+    start_year : int
+        First year of the dataset
+    end_year : int
+        Last year of the dataset
+    procdir : str
+        Where to save the output
+    return_stats : bool
+        Whether to return the dataset of relative trends and stats, or simply save
+
+    Returns
+    -------
+    If return_trends=True
+    ds_conditional_precip : xr.Dataset
+        Stats and relative trends in precipitation on different percentiles of days
+    """
+
+    savename = '%s/%s_precip_relative_stats_p%02i_%04i-%04i.nc' % (procdir,
+                                                                   pr_name,
+                                                                   percentile_width,
+                                                                   start_year,
+                                                                   end_year)
+    if not os.path.isfile(savename):
+
+        ds_conditional_precip = xr.Dataset()
+
+        for p in percentile_base:
+            this_term = da.copy()
+
+            # subset to type of day (hot, average, cold)
+            this_term = this_term.where(idx_all['base_p_%02i' % p] & is_land)  # remask missing places
+
+            # Calculate the fraction of days that are rainy
+            prob_rain = ((this_term > rain_cut).where(is_land)).mean('time')
+            ds_conditional_precip['prob_rain_p%02i' % (p)] = prob_rain
+
+            # Calculate the average rainfall
+            avg_rain = this_term.mean('time')
+            ds_conditional_precip['avg_rain_p%02i' % (p)] = avg_rain
+
+            # calculate the trend conditioning on the type of day
+            beta = this_term.polyfit(dim='time', deg=1)
+            beta = slope_normalizer*(beta['polyfit_coefficients'].sel(degree=1))
+            ds_conditional_precip['trend_p%02i' % (p)] = beta
+            del this_term, beta
+
+        ds_conditional_precip.to_netcdf(savename)
+
+        if return_stats:
+            return ds_conditional_precip
+        else:
+            return
+    else:
+        if return_stats:
+            ds_conditional_precip = xr.open_dataset(savename)
+        else:
+            return
+
+
+def get_trend_cmip(ds, metric, scenario, region, trend_normalizer):
+    """
+    Calculate trend in CMIP6 output for ranks for specific subsets of the data
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Contains ranks for each model simulation and each region and metric
+    metric : str
+        The name of the metric to calculate trends for
+    scenario : str
+        'hist' or 'ssp370'
+    region : str
+        The name of the region to calculate trends for
+    trend_normalizer : float
+        Mutliply trends by this value
+
+    Returns
+    -------
+    beta : xr.DataArray
+        Trends across model simulations for the desired metric, region, scenario
+    """
+
+    this_ts = ds[metric].sel(scenario=scenario, region=region)
+
+    # Drop all nan entries (case where data are in one scenario but not the other)
+    this_ts = this_ts.dropna(dim='model-variant', how='all')
+    this_ts = this_ts.dropna(dim='year', how='all')
+
+    # Get slopes
+    beta = this_ts.polyfit(dim='year', deg=1)
+    beta = beta.sel(degree=1)['polyfit_coefficients']
+
+    # Put in standard units of trends
+    beta *= trend_normalizer
+
+    return beta
