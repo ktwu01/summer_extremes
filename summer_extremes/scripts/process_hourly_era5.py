@@ -2,20 +2,27 @@ from subprocess import check_call
 import click
 import xarray as xr
 from glob import glob
+import numpy as np
 
 
 @click.command()
 @click.option('--year', help='Year of data to process', type=click.INT)
 def t2m_avg_max_min(year, era5_daily_dir='/home/data/ERA5/day'):
 
-    files = sorted(glob('%s/t2m_hourly_%04i.nc' % (era5_daily_dir, year)))
+    files = sorted(glob('%s/t2m_hourly_%04i*.nc' % (era5_daily_dir, year)))
     if len(files) > 1:  # case of the last year, when the last month is in a different file
         da = []
         for f in files:
             this_da = xr.open_dataarray(f)
-            # only keep ERA5 (not ERA5T)
+
             if 'expver' in this_da.dims:
-                this_da = this_da.sel(expver=1)
+                missing_val = 261.3532
+                # where to switch from ERA5 to ERA5T
+                start5 = np.where((this_da[:, 1, 0, 0] != missing_val) & ~np.isnan(this_da[:, 1, 0, 0]))[0][0]
+                tmp = this_da.sel(expver=1)
+                tmp[start5:, ...] = this_da.sel(expver=5)[start5:, ...]
+                this_da = tmp
+
             da.append(this_da)
         da = xr.concat(da, dim='time')
     else:
@@ -48,8 +55,8 @@ def t2m_avg_max_min(year, era5_daily_dir='/home/data/ERA5/day'):
     del da_daily_min
 
     # delete original file of hourly data
-    cmd = 'rm -f %s/t2m_hourly_%04i.nc' % (era5_daily_dir, year)
-    check_call(cmd.split())
+    # cmd = 'rm -f %s/t2m_hourly_%04i*.nc' % (era5_daily_dir, year)
+    # check_call(cmd.split())
 
 
 if __name__ == '__main__':
