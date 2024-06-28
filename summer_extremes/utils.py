@@ -1185,3 +1185,39 @@ def get_trend_cmip(ds, metric, scenario, region, trend_normalizer):
     beta *= trend_normalizer
 
     return beta, nyrs
+
+
+def get_metric(nyears, ndays_per_summer, skew_choice, normal=False):
+    """
+    Generate random data, either normal or not, and calculate difference between
+    seasonal maximum and median.
+    """
+    # Generate data from each location
+    nloc = len(skew_choice)
+    all_widths = np.empty((nloc, nyears))
+
+    for s_ct, this_skew in enumerate(skew_choice):
+        if normal:
+            data = np.random.randn(nyears*ndays_per_summer)
+        else:
+            data = hu_stats.get_skewed_distr_gamma(this_skew, nyears*ndays_per_summer)
+        data = data.reshape((nyears, ndays_per_summer))
+        width = np.max(data, axis=-1) - np.median(data, axis=-1)
+        all_widths[s_ct, :] = width
+
+    # average across locations
+    metric = np.mean(all_widths, axis=0)
+
+    return metric
+
+
+def get_metric_slope_p(metric):
+    """
+    Calculate slope and p-value
+    """
+    nt = len(metric)
+    x = np.arange(nt).astype(float)
+    x -= np.mean(x)
+
+    out = stats.linregress(x, metric)
+    return out.slope, out.pvalue
