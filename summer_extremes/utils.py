@@ -13,6 +13,7 @@ import cartopy.feature as cfeature
 from cartopy.mpl.gridliner import LONGITUDE_FORMATTER, LATITUDE_FORMATTER
 import matplotlib.ticker as mticker
 from glob import glob
+from matplotlib.patches import PathPatch
 
 
 # For plots
@@ -542,7 +543,7 @@ def make_rank_plots(ds_ranks1, rank1name, metrics_to_plot, long_names, figname, 
     plt.savefig('%s/%s' % (figdir, figname), dpi=200, bbox_inches='tight')
 
 
-def make_standard_map(da, ax, cmap, bounds, is_sig=None, is_stations=False):
+def make_standard_map(da, ax, cmap, bounds, is_sig=None, is_stations=False, **kwargs):
     """
     Plot the lat/lon dataframe on the axis ax
 
@@ -588,15 +589,25 @@ def make_standard_map(da, ax, cmap, bounds, is_sig=None, is_stations=False):
                                 extend='both')
 
     if is_sig is not None:
+        if 'stipple_color' in kwargs:
+            scolor = kwargs['stipple_color']
+        else:
+            scolor = 'w'
         cs = is_sig.fillna(0).plot.contourf(ax=ax,
                                             levels=[-1, 0, 2],
                                             colors='none', hatches=[None, '...'],
                                             transform=datacrs,
                                             zorder=1,
                                             add_colorbar=False)
+        for collection in cs.collections:
+            for path in collection.get_paths():
+                hatch = collection.get_hatch()
+                if hatch:  # only change color if hatches are present
+                    patch = PathPatch(path, hatch=hatch, facecolor='none', edgecolor=scolor, linewidth=0)
+                    ax.add_patch(patch)
 
-        cs.collections[-1].set_edgecolor('w')
-        cs.collections[-1].set_linewidth(1)
+        cs.collections[-1].set_edgecolor(scolor)
+        cs.collections[-1].set_linewidth(0.5)
 
     ax.add_feature(cfeature.COASTLINE, color='black', zorder=2)
     ax.add_feature(cfeature.LAKES, color='gray', zorder=2)
@@ -1154,6 +1165,8 @@ def get_trend_cmip(ds, metric, scenario, region, trend_normalizer):
     -------
     beta : xr.DataArray
         Trends across model simulations for the desired metric, region, scenario
+    nyrs : int
+        Number of years going into the trend
     """
 
     this_ts = ds[metric].sel(scenario=scenario, region=region)
@@ -1162,6 +1175,8 @@ def get_trend_cmip(ds, metric, scenario, region, trend_normalizer):
     this_ts = this_ts.dropna(dim='model-variant', how='all')
     this_ts = this_ts.dropna(dim='year', how='all')
 
+    nyrs = len(this_ts.year)
+
     # Get slopes
     beta = this_ts.polyfit(dim='year', deg=1)
     beta = beta.sel(degree=1)['polyfit_coefficients']
@@ -1169,4 +1184,4 @@ def get_trend_cmip(ds, metric, scenario, region, trend_normalizer):
     # Put in standard units of trends
     beta *= trend_normalizer
 
-    return beta
+    return beta, nyrs
