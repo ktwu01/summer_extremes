@@ -12,7 +12,7 @@ There are four scripts to run to perform the analysis before making figures:
 
 (3) The data processing to analyze the relative trends in precipitation is performed in scripts/relative_precip_trends.py. This script can be run with observational dataset and CMIP6 simulations. Observational datasets should be regridded to the 1x1 ERA5 grid, and use the hot/cold/median day definitions from the code in (2). For CMIP6, hot/cold/median days are calculated in the code. Observational dataset used here are: ERA5, CPC, CHIRPS, PERSIANN, MSWEP, GPCC, and GHCND. 
 
-(4) The synthetic data used in Fig. S2 is created in scripts/synthetic_data_and_dof.py
+(4) The synthetic data used in Fig. S2 is created in scripts/synthetic_data_tests.py
 
 The main figures are all made within the notebook found at notebooks/make_figs.ipynb. The supplemental figures are made in notebooks/make_supp_figs.ipynb.
 
