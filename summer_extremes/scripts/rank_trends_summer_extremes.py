@@ -23,9 +23,7 @@ import pandas as pd
 import xarray as xr
 from glob import glob
 import os
-import geopandas
-from helpful_utilities import ncutils
-from scipy.ndimage.morphology import binary_dilation
+from helpful_utilities.geom import get_regrid_country
 
 
 # Local (KM) directories for data
@@ -33,6 +31,7 @@ era5_dir = '/home/data/ERA5/day'
 era5_ls = '/home/data/ERA5/fx/era5_lsmask_1x1.nc'
 procdir = '/home/data/projects/summer_extremes/proc'
 figdir = '/home/kmckinnon/summer_extremes/figs'
+country_folder = '/home/data/geom/ne_110m_admin_0_countries/'  # outlines of countries
 
 # Args for main text
 dataname = 'ERA5'
@@ -41,37 +40,52 @@ end_year = 2023
 lower_lat = -60
 upper_lat = 80
 
-# Alternatives #####
+##### Alternatives #####
 # for comparison to satellite era alone
 # start_year = 1979
-#
+
+# for comparison to CHIRTS
+# start_year = 1983
+# end_year = 2016
+
 # for analysis of CMIP
 # start_year = 2024
 # end_year = 2099
-#
+
 # for analysis of station data
 # dataname = 'GHCND'
-#
+
+# for analysis of CHIRTS
+# dataname = 'CHIRTS'
+
 # for analysis of CMIP6 data, form is MODEL/VARIANT
 # dataname = 'ACCESS-ESM1-5/r11i1p1f1'
-# End alternatives #####
+##### End alternatives #####
 
 if dataname == 'ERA5':
     tvar = 't2m_x'
     t_data_dir = '/home/data/ERA5/day'
+    is_gridded = True
 elif dataname == 'GHCND':
     tvar = 'TMAX'
     t_data_dir = '/home/data/GHCND'
+    is_gridded = False
 elif '/' in dataname:  # CMIP sims
     tvar = 'tasmax'
     t_data_dir = '/home/data/CMIP6'
     model_name = dataname.split('/')[0]
     variant_number = dataname.split('/')[1]
+    is_gridded = True
+elif dataname == 'CHIRTS':
+    tvar = 'Tmax'
+    t_data_dir = '/home/data/CHIRTS'
+    start_year = 1983
+    end_year = 2016
+    is_gridded = True
 
 season = 'warm'  # type of season (currently 'warm' is only option)
 halfwidth = 45  # half-length of warm season
 land_cutoff = 0.5  # land is anything with a land fraction greater than this
-nbases = 5  # number of Fourier bases to estimate seasonal cycle
 
 # types of extremes metrics to calculate
 extreme_names = ('seasonal_max', 'seasonal_min',
@@ -91,37 +105,33 @@ savestr2 = '_%s-season_2x%02i-days_lat%02i-%02i' % (season, halfwidth, lower_lat
 savestr = savestr + savestr2
 
 # Load correct land mask for gridded datasets
-if (dataname == 'ERA5'):
+if is_gridded:
     lsmask = xr.open_dataarray(era5_ls).squeeze()
-elif '/' in dataname:  # CMIP sims
+
+# if CMIP, overwrite
+if '/' in dataname:  # CMIP sims
     mask_name = glob('%s/fx/sftlf_fx_%s*.nc' % (t_data_dir, model_name))[0]
     lsmask = xr.open_dataset(mask_name)['sftlf']
     if lsmask.max() > 1:
         lsmask /= 100
 
-# Load Greenland to mask for gridded datasets
-if ((dataname == 'ERA5') | ('/' in dataname)):  # for gridded data
-    # Get Greenland to mask later
-    countries = geopandas.read_file('/home/data/geom/ne_110m_admin_0_countries/')
-    greenland = countries.query("ADMIN == 'Greenland'").reset_index(drop=True)
-    ds = xr.Dataset(coords={'lon': np.linspace(-179.5, 180, 1000), 'lat': np.linspace(-90, 90, 1000)})
-    da_greenland = ncutils.rasterize(greenland['geometry'], ds.coords)
-    da_greenland = ncutils.lon_to_360(da_greenland)
-    da_greenland = da_greenland.fillna(0)
-    da_greenland = da_greenland.interp({'lat': lsmask.lat, 'lon': lsmask.lon})
-    # regridded mask misses boundary
-    expanded_greenland = binary_dilation(binary_dilation((da_greenland > 0).values))
-    da_greenland = da_greenland.copy(data=expanded_greenland)
+da_greenland = get_regrid_country('Greenland', country_folder, lsmask.lat, lsmask.lon, dilate=True)
+is_land = (lsmask > land_cutoff) & ~da_greenland
 
-# Load selected dataset for temperature
-if dataname == 'ERA5':
-    files = sorted(glob('%s/%s/1x1/%s_????_1x1.nc' % (t_data_dir, tvar, tvar)))
-    years = np.array([int(f.split('/')[-1].split('_')[-2]) for f in files])
+if (dataname == 'ERA5') | (dataname == 'CHIRTS'):
+    if dataname == 'ERA5':
+        files = sorted(glob('%s/%s/1x1/%s_????_1x1.nc' % (t_data_dir, tvar, tvar)))
+        years = np.array([int(f.split('/')[-1].split('_')[-2]) for f in files])
+    else:
+        files = sorted(glob('%s/1x1/%s.????_1x1.nc' % (t_data_dir, tvar)))
+        years = np.array([int(f.split('/')[-1].split('.')[-2].split('_')[0]) for f in files])
+
     use_files = np.isin(years, np.arange(start_year, end_year + 1))
     files = np.array(files)[np.where(use_files)[0].astype(int)]
     da = xr.open_mfdataset(files).convert_calendar('365_day')[tvar]
 
 elif dataname == 'GHCND':
+
     # need longer period for SH stations, so load data separately
     f_station_list = '%s/ghcnd-stations.txt' % t_data_dir
     f_inventory = '%s/ghcnd-inventory.txt' % t_data_dir
@@ -135,7 +145,8 @@ elif dataname == 'GHCND':
                                                                  lat_range, lon_range,
                                                                  start_year, end_year)
 
-    ds_SH = heat_utils.get_ghcnd_ds(station_list, [tvar], datadir_ghcnd, start_year, end_year, subset_years=True)
+    ds_SH = heat_utils.get_ghcnd_ds(station_list, [tvar], datadir_ghcnd,
+                                    start_year, end_year, subset_years=True)
 
     # Get NH stations
     if start_year == 1958:
@@ -148,7 +159,8 @@ elif dataname == 'GHCND':
                                                                  lat_range, lon_range,
                                                                  start_year + 1, end_year)
 
-    ds_NH = heat_utils.get_ghcnd_ds(station_list, [tvar], datadir_ghcnd, start_year + 1, end_year, subset_years=True)
+    ds_NH = heat_utils.get_ghcnd_ds(station_list, [tvar], datadir_ghcnd,
+                                    start_year + 1, end_year, subset_years=True)
 
     # merge
     ds = xr.concat((ds_NH, ds_SH), dim='station')
@@ -173,35 +185,31 @@ elif '/' in dataname:  # CMIP sims
 else:
     raise Exception('TODO')
 
-# Mask to land, and specified latitude band
-if (dataname == 'ERA5') | ('/' in dataname):  # gridded products
+if is_gridded:  # gridded products
 
     da = da.sel(time=slice('%04i' % (start_year), '%04i' % (end_year)))
 
-    # round lat for matching
+    # round lat for matching between landmask and data -- sometimes an issue in CMIP models
     da = da.assign_coords(lat=np.round(da.lat, 3))
-    lsmask = lsmask.assign_coords(lat=np.round(lsmask.lat, 3))
-    da_greenland = da_greenland.assign_coords(lat=np.round(da_greenland.lat, 3))
+    is_land = is_land.assign_coords(lat=np.round(is_land.lat, 3))
 
     # pull out desired domain
     da_subset = da.sel(lat=slice(lower_lat, upper_lat)).load()
 
     # mask to land
-    da_subset = da_subset.where(lsmask > land_cutoff)
+    da_subset = da_subset.where(is_land)
 
-    # remove Greenland
-    da_subset = da_subset.where(~da_greenland)
-
-# Create basis functions for estimating seasonal cycle
+# create basis functions to remove seasonal cycle
 time_vec = pd.date_range(start='1950-01-01', periods=365, freq='D')
 doy = xr.DataArray(np.arange(1, 366), coords={'time': time_vec}, dims='time')
 t_basis = (doy/365).values
+nbases = 5
 nt = len(t_basis)
 bases = np.empty((nbases, nt), dtype=complex)
 for counter in range(nbases):
     bases[counter, :] = np.exp(2*(counter + 1)*np.pi*1j*t_basis)
 
-# Get empirical average for each day of year
+# get empirical average for the doy
 empirical_sc = da_subset.groupby('time.dayofyear').mean()
 mu = empirical_sc.mean(dim='dayofyear')
 
@@ -214,6 +222,7 @@ elif len(empirical_sc.shape) == 2:  # in situ
 
 # project zero-mean data onto basis functions
 data = (empirical_sc - mu).data
+
 coeff = 2/nt*(np.dot(bases, data.reshape((nday, loc_len))))
 
 # reconstruct seasonal cycle
@@ -226,19 +235,22 @@ da_rec = empirical_sc.copy(data=rec) + mu
 # get correlation to confirm that we've done it correctly. This should be very high!
 r2_ann = xr.corr(da_rec, empirical_sc, dim='dayofyear')
 
-# Create mask by day of year for the warm season
+# Identify hottest day of the year for each latitude band for gridded products
+
 if dataname == 'GHCND':  # for GHCND, use ERA5 seasonality
     seasonality_savename = '%s/ERA5_hottest_doys_%s.nc' % (procdir, ghcnd_to_ERA5_dict[tvar])
     if os.path.isfile(seasonality_savename):
         da_doy = xr.open_dataarray(seasonality_savename)
     else:
-        raise Exception("need to calculate seasonality with ERA5 first")
+        raise Exception("Need to calculate seasonality with ERA5 first")
 
 else:
+
     seasonality_savename = '%s/%s_hottest_doys_%s.nc' % (procdir, dataname.replace('/', '-'), tvar)
     if os.path.isfile(seasonality_savename):
         da_doy = xr.open_dataarray(seasonality_savename)
     else:
+
         # get hottest doy at each location
         hottest_day = da_rec.mean('lon').fillna(-999).argmax(dim='dayofyear')
         hottest_day = hottest_day.where(hottest_day >= 0)
@@ -270,7 +282,7 @@ else:
 
         da_doy.to_netcdf(seasonality_savename)
 
-# remove the repeating seasonal cycle from the data
+# Remove the seasonal cycle
 da_anom = da_subset.groupby('time.dayofyear') - da_rec
 
 if dataname == 'GHCND':
@@ -279,6 +291,7 @@ if dataname == 'GHCND':
     da_doy = xr.concat(da_doy_ghcnd, dim='station')
     da_doy['lat'] = da_anom.lat  # reset to original latitude values
 
+# Shift the SH 1/2 year forward so that DJF of year X-X+1 is associated with year X+1
 # define SH as when seasonal cycle switches by ~180 days
 # sometimes happens at e.g. -1.5S
 if dataname == 'GHCND':
@@ -288,14 +301,14 @@ else:
     end_SH_idx = np.where(ndays_first_half == 0)[0][-1]
     end_SH_lat = da_doy.lat[end_SH_idx].data
 
-# Subset to window around warmest day
+# Subset to 91 day window around warmest day
 da_anom_warm_season = da_anom.groupby('time.dayofyear').where(da_doy == 1)
 
 # roll SH by 365/2 days so that years align across latitudes
 idx_SH = da_anom_warm_season.lat <= end_SH_lat
 try:
     da_anom_warm_season_SH = da_anom_warm_season.sel(lat=slice(end_SH_lat)).shift({'time': int(365/2)})
-except KeyError:
+except:
     da_anom_warm_season_SH = da_anom_warm_season[:, idx_SH].shift({'time': int(365/2)})
 
 # replace SH data with shifted data
@@ -307,7 +320,7 @@ elif len(da_anom_warm_season.shape) == 2:  # in situ
 # cutoff first year, because we've shifted SH forward
 da_anom_warm_season = da_anom_warm_season.sel(time=slice('%i' % (start_year + 1), '%i' % end_year))
 
-# For station data, do quality control based on data availability
+# Remove stations with insufficient data in GHCND
 if dataname == 'GHCND':
 
     season_length = halfwidth*2 + 1
@@ -325,12 +338,10 @@ if dataname == 'GHCND':
                    (bad_years[-10:, :].sum('year') > (1 - cutoff_years)*10))
 
     idx_good = np.where(~bad_station)[0]
-
     da_anom_warm_season = da_anom_warm_season[:, idx_good]
 
-# All of the above was data preprocessing!
+# Calculate ranks for various metrics of extremes minus the median
 
-# Now, remove seasonal median, calculate metrics, convert to ranks, and save
 metric_savename = '%s/metrics_%s.nc' % (procdir, savestr)
 rank_savename = '%s/ranks_%s.nc' % (procdir, savestr)
 
@@ -350,46 +361,46 @@ else:
     ds_metrics.to_netcdf(metric_savename)
     ds_ranks.to_netcdf(rank_savename)
 
-
 # Compare to a 5-year running average of the median
-metric_savename_5yrmedian = '%s/metrics_5yrmedian_%s.nc' % (procdir, savestr)
-rank_savename_5yrmedian = '%s/ranks_5yrmedian_%s.nc' % (procdir, savestr)
+if dataname == 'ERA5':
+    metric_savename_5yrmedian = '%s/metrics_5yrmedian_%s.nc' % (procdir, savestr)
+    rank_savename_5yrmedian = '%s/ranks_5yrmedian_%s.nc' % (procdir, savestr)
 
-if os.path.isfile(metric_savename_5yrmedian) & os.path.isfile(rank_savename_5yrmedian):
-    ds_metrics_5yrmedian = xr.open_dataset(metric_savename_5yrmedian)
-    ds_ranks_5yrmedian = xr.open_dataset(rank_savename_5yrmedian)
+    if os.path.isfile(metric_savename_5yrmedian) & os.path.isfile(rank_savename_5yrmedian):
+        ds_metrics_5yrmedian = xr.open_dataset(metric_savename_5yrmedian)
+        ds_ranks_5yrmedian = xr.open_dataset(rank_savename_5yrmedian)
 
-else:
-    sample_median = da_anom_warm_season.groupby('time.year').median()
-    sample_median_5 = sample_median.rolling(year=5, center=True, min_periods=1).mean()
+    else:
+        sample_median = da_anom_warm_season.groupby('time.year').median()
+        sample_median_5 = sample_median.rolling(year=5, center=True, min_periods=1).mean()
 
-    anom_from_median_5 = da_anom_warm_season.groupby('time.year') - sample_median_5
+        anom_from_median_5 = da_anom_warm_season.groupby('time.year') - sample_median_5
 
-    # calculate heatwave metrics based on these anomalies
-    ds_metrics_5yrmedian = summer_utils.calc_heat_metrics(anom_from_median_5, extreme_names)
-    ds_ranks_5yrmedian = summer_utils.rank_and_sort_heat_metrics(ds_metrics_5yrmedian)
+        # calculate heatwave metrics based on these anomalies
+        ds_metrics_5yrmedian = summer_utils.calc_heat_metrics(anom_from_median_5, extreme_names)
+        ds_ranks_5yrmedian = summer_utils.rank_and_sort_heat_metrics(ds_metrics_5yrmedian)
 
-    # save
-    ds_metrics_5yrmedian.to_netcdf(metric_savename_5yrmedian)
-    ds_ranks_5yrmedian.to_netcdf(rank_savename_5yrmedian)
-
+        # save
+        ds_metrics_5yrmedian.to_netcdf(metric_savename_5yrmedian)
+        ds_ranks_5yrmedian.to_netcdf(rank_savename_5yrmedian)
 
 # Compare to using the mean as estimate of the middle of the distribution
-metric_savename_mean = '%s/metrics_mean_%s.nc' % (procdir, savestr)
-rank_savename_mean = '%s/ranks_mean_%s.nc' % (procdir, savestr)
+if dataname == 'ERA5':
+    metric_savename_mean = '%s/metrics_mean_%s.nc' % (procdir, savestr)
+    rank_savename_mean = '%s/ranks_mean_%s.nc' % (procdir, savestr)
 
-if os.path.isfile(metric_savename_mean) & os.path.isfile(rank_savename_mean):
-    ds_metrics_mean = xr.open_dataset(metric_savename_mean)
-    ds_ranks_mean = xr.open_dataset(rank_savename_mean)
+    if os.path.isfile(metric_savename_mean) & os.path.isfile(rank_savename_mean):
+        ds_metrics_mean = xr.open_dataset(metric_savename_mean)
+        ds_ranks_mean = xr.open_dataset(rank_savename_mean)
 
-else:
-    sample_mean = da_anom_warm_season.groupby('time.year').mean()
-    anom_from_mean = da_anom_warm_season.groupby('time.year') - sample_mean
+    else:
+        sample_mean = da_anom_warm_season.groupby('time.year').mean()
+        anom_from_mean = da_anom_warm_season.groupby('time.year') - sample_mean
 
-    # calculate heatwave metrics based on these anomalies
-    ds_metrics_mean = summer_utils.calc_heat_metrics(anom_from_mean, extreme_names)
-    ds_ranks_mean = summer_utils.rank_and_sort_heat_metrics(ds_metrics_mean)
+        # calculate heatwave metrics based on these anomalies
+        ds_metrics_mean = summer_utils.calc_heat_metrics(anom_from_mean, extreme_names)
+        ds_ranks_mean = summer_utils.rank_and_sort_heat_metrics(ds_metrics_mean)
 
-    # save
-    ds_metrics_mean.to_netcdf(metric_savename_mean)
-    ds_ranks_mean.to_netcdf(rank_savename_mean)
+        # save
+        ds_metrics_mean.to_netcdf(metric_savename_mean)
+        ds_ranks_mean.to_netcdf(rank_savename_mean)
