@@ -1,0 +1,13 @@
+geopandas==0.12.2
+xesmf==0.6.3
+Cartopy==0.18.0
+numpy==1.19.2
+helpful_utilities.egg==info
+xarray==2022.9.0
+cdsapi==0.5.1
+record_breaking_heat.egg==info
+statsmodels==0.12.2
+click==7.1.2
+scipy==1.6.2
+matplotlib==3.3.2
+pandas==1.3.2
