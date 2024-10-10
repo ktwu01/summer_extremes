@@ -2,7 +2,7 @@
 Summer extremes
 ===============
 
-This repo contains the code required to perform the data analysis and create the figures for McKinnon, Simpson, and Williams, under review in PNAS.
+This repo contains the code required to perform the data analysis and create the figures for McKinnon, Simpson, and Williams, "The pace of change of summertime temperature extremes", 2024, PNAS, https://www.pnas.org/doi/10.1073/pnas.2406143121. 
 
 There are four scripts to run to perform the analysis before making figures:
 
