@@ -703,7 +703,7 @@ def add_text_regional_averages(da, ax, regions, fontsize=12):
     avg_vals = calc_regional_averages(da, regions)
 
     for ct_d, region in enumerate(regions):
-        ax.text(0.01, 0.5 - 0.1*ct_d, '%s: %0.1f' % (region, avg_vals[ct_d]),
+        ax.text(0.01, 0.53 - 0.1*ct_d, '%s: %0.1f' % (region, avg_vals[ct_d]),
                 transform=ax.transAxes, fontsize=fontsize)
 
     return ax
@@ -885,9 +885,8 @@ def make_SEB_plots(SEB_rel_trends, precip_rel_trends, terms, tail_dict, figname,
             cb.ax.tick_params(labelsize=labelsize)
             cb.set_label(cbar_label, fontsize=fontsize)
             ax_map.set_title('')
-            ax_map.text(0.01, 0.03, '(%s) %s,\n%s minus median' % (letters[letter_ct],
-                                                                   caption_names[ct], tail),
-                        transform=ax_map.transAxes, fontsize=12)
+            ax_map.text(0.01, 0.05, '(%s)' % letters[letter_ct], transform=ax_map.transAxes, fontsize=12)
+            ax_map.text(0.08, 0.05, '%s' % caption_names[ct], transform=ax_map.transAxes, fontsize=12)
 
             letter_ct += 1
 
