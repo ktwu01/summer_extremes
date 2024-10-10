@@ -1220,3 +1220,52 @@ def get_metric_slope_p(metric):
 
     out = stats.linregress(x, metric)
     return out.slope, out.pvalue
+
+
+def get_doy_array(peak_day, halfwidth):
+    """
+    Given a central (peak) day of year, return a binary datarray with indicators of whether a day is
+    included in that season.
+
+    Parameters
+    ----------
+    peak_day : xr.DataArray
+        The index of the peak day (hottest or coldest) as a function of latitude and longitude
+    halfwidth : int
+        The length of the season on either side of the peak day
+
+    Returns
+    -------
+    da_doy : xr.DataArray
+        A 1/0 array of whether a day of year at each lat/lon is included in the season
+    """
+
+    # label as 1 if included, 0 otherwise
+    nlat = len(peak_day.lat)
+    nlon = len(peak_day.lon)
+    doy_mat = np.zeros((365, nlat, nlon))
+    doy_array = np.arange(1, 366)
+    for ct_lat, this_lat in enumerate(peak_day.lat):
+        for ct_lon, this_lon in enumerate(peak_day.lon):
+            middle_day = peak_day.sel(lat=this_lat, lon=this_lon).data
+            if np.isnan(middle_day):  # ocean
+                doy_mat[:, ct_lat, ct_lon] = np.nan
+            first_day = middle_day - halfwidth
+            last_day = middle_day + halfwidth
+
+            # Account for the looping of days of year
+            if first_day < 0:
+                first_day += 365
+            if last_day > 365:
+                last_day -= 365
+
+            if last_day > first_day:  # all in one year
+                keep_idx = (doy_array >= first_day) & (doy_array <= last_day)
+            else:  # years are split
+                keep_idx = (doy_array <= last_day) | (doy_array >= first_day)
+            doy_mat[keep_idx, ct_lat, ct_lon] = 1
+
+    da_doy = xr.DataArray(doy_mat, dims=('dayofyear', 'lat', 'lon'),
+                          coords={'dayofyear': np.arange(1, 366), 'lat': peak_day.lat, 'lon': peak_day.lon})
+
+    return da_doy
