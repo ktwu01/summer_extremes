@@ -569,7 +569,7 @@ def make_standard_map(da, ax, cmap, bounds, is_sig=None, is_stations=False, **kw
     pc :
     """
 
-    ax.fill_betweenx([-tropics_bound, tropics_bound], -180, 180, color='gray', alpha=0.5, transform=ccrs.PlateCarree())
+    ax.fill_betweenx([-tropics_bound, tropics_bound], -180, 180, color='gray', alpha=0.5)
 
     if is_stations:
         norm = colors.BoundaryNorm(bounds, cmap.N)
