@@ -104,3 +104,8 @@ ENV/
 # IDE settings
 .vscode/
 .idea/
+# macOS system files
+.DS_Store
+._.DS_Store
+**/.DS_Store
+**/._.DS_Store
